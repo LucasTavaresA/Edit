@@ -19,11 +19,15 @@ Stock Compose app template, nothing custom written yet.
 
 ## Blockers / fix before building features
 
-1. **No version control.** `git init` + first commit.
-2. **Edge-to-edge breaks on Android 15+.** targetSdk 36 forces edge-to-edge, but `Theme.kt` uses the no-op `window.statusBarColor` / `navigationBarColor`, and the top bar is a fixed 36dp with `WindowInsets(0,0,0,0)` — content renders under the status bar. Needs `enableEdgeToEdge()` and real inset handling.
-3. **Stale, self-contradictory deps.** Compose BOM `2022.10.00` overridden by explicit pins (`ui 1.3.0`, `material3 1.0.0`) plus `resolutionStrategy.force` on `core-ktx 1.8.0` / `lifecycle 2.3.1`. Per the in-file comments this all works around **a local maven repo**, but `settings.gradle.kts` resolves from `google()`/`mavenCentral()` online — so the forces and the large `packaging` block are likely dead weight. Blocks `BasicTextField2` / `TextFieldState`, which a text editor wants.
-4. **`allowBackup="true"`** — wrong default for an encrypted-file app. `backup_rules.xml` / `data_extraction_rules.xml` exist but the manifest never references them.
-5. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built.
+1. **Edge-to-edge breaks on Android 15+.** targetSdk 36 forces edge-to-edge, but `Theme.kt` uses the no-op `window.statusBarColor` / `navigationBarColor`, and the top bar is a fixed 36dp with `WindowInsets(0,0,0,0)` — content renders under the status bar. Needs `enableEdgeToEdge()` and real inset handling.
+2. **Stale, self-contradictory deps.** Compose BOM `2022.10.00` overridden by explicit pins (`ui 1.3.0`, `material3 1.0.0`) plus `resolutionStrategy.force` on `core-ktx 1.8.0` / `lifecycle 2.3.1`. Per the in-file comments this all works around **a local maven repo**, but `settings.gradle.kts` resolves from `google()`/`mavenCentral()` online — so the forces and the large `packaging` block are likely dead weight. Blocks `BasicTextField2` / `TextFieldState`, which a text editor wants.
+3. **`allowBackup="true"`** — wrong default for an encrypted-file app. `backup_rules.xml` / `data_extraction_rules.xml` exist but the manifest never references them.
+4. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built.
+
+## Environment
+
+- Git needs `git config --global --add safe.directory <project dir>` for anything under `/storage/emulated/0` — sdcardfs reports an owner git refuses to trust. Every new project dir needs its own line.
+- `/storage/emulated/0` is mounted noexec, so scripts there never keep the exec bit; run them as `bash script.sh`.
 
 ## Cleanups (low priority)
 
