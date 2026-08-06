@@ -20,18 +20,18 @@ Stock Compose app template, nothing custom written yet.
 ## Blockers / fix before building features
 
 1. **Edge-to-edge breaks on Android 15+.** targetSdk 36 forces edge-to-edge, but `Theme.kt` uses the no-op `window.statusBarColor` / `navigationBarColor`, and the top bar is a fixed 36dp with `WindowInsets(0,0,0,0)` — content renders under the status bar. Needs `enableEdgeToEdge()` and real inset handling.
-2. **Stale, self-contradictory deps.** Compose BOM `2022.10.00` overridden by explicit pins (`ui 1.3.0`, `material3 1.0.0`) plus `resolutionStrategy.force` on `core-ktx 1.8.0` / `lifecycle 2.3.1`. Per the in-file comments this all works around **a local maven repo**, but `settings.gradle.kts` resolves from `google()`/`mavenCentral()` online — so the forces and the large `packaging` block are likely dead weight. Blocks `BasicTextField2` / `TextFieldState`, which a text editor wants.
-3. **`allowBackup="true"`** — wrong default for an encrypted-file app. `backup_rules.xml` / `data_extraction_rules.xml` exist but the manifest never references them.
-4. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built.
+2. **`allowBackup="true"`** — wrong default for an encrypted-file app. `backup_rules.xml` / `data_extraction_rules.xml` exist but the manifest never references them.
+3. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built. Compose needs proguard keep rules once minify actually runs.
 
 ## Environment
 
 - Git needs `git config --global --add safe.directory <project dir>` for anything under `/storage/emulated/0` — sdcardfs reports an owner git refuses to trust. Every new project dir needs its own line.
 - `/storage/emulated/0` is mounted noexec, so scripts there never keep the exec bit; run them as `bash script.sh`.
+- Gradle from the shell needs `-Pandroid.aapt2FromMavenOverride="$ANDROID_HOME/build-tools/35.0.0/aapt2"`. The Maven aapt2 is a glibc binary that cannot run under bionic, so without this every build dies in `processDebugResources`. Add `--no-daemon --max-workers=1 -Dorg.gradle.jvmargs="-Xmx1536m"` to avoid running out of memory. A clean debug build is roughly 3 minutes, so expect a background run rather than a foreground one.
+- **Version ceiling: AGP 8.11 / compileSdk 36.** Compose BOM 2026.x, core-ktx 1.17+ and lifecycle 2.10+ all require AGP 9.1+ and compileSdk 37, and only `android-36` is installed. Raising the ceiling means installing the SDK 37 platform and bumping AGP.
 
 ## Cleanups (low priority)
 
-- `SmallTopAppBar` is deprecated
 - Template leftovers: `MyComposeApplicationTheme`, `Greeting`, Purple/Pink palette
 - `junit` / `espresso` declared in `libs.versions.toml` but unused; no test source sets
 

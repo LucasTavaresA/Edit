@@ -9,7 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SmallTopAppBar
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarDefaults
@@ -32,12 +32,12 @@ import com.lucasta.edit.ui.theme.MyComposeApplicationTheme
                 //}
                 Scaffold(
                     topBar = {
-                        SmallTopAppBar(
+                        TopAppBar(
                             // title = { Text("Hello Android!") },
                             title = {},
                             windowInsets = WindowInsets(0, 0, 0, 0),
                             modifier = Modifier.height(36.dp),
-                            colors = TopAppBarDefaults.smallTopAppBarColors(
+                            colors = TopAppBarDefaults.topAppBarColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
                                 titleContentColor = MaterialTheme.colorScheme.onPrimary
                             )
