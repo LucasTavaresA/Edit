@@ -8,7 +8,7 @@ Stock Compose app template, nothing custom written yet.
 
 - `com.lucasta.edit`, AGP 8.11.0, Kotlin 1.9.22, Gradle 8.14.3
 - minSdk 23, compileSdk 36, targetSdk 36
-- Source: `MainActivity.kt` (Scaffold + `Greeting("Android")`) + template theme (`Color.kt`, `Theme.kt`, `Type.kt`)
+- Source: `MainActivity.kt` (bare hello world) + template theme (`Color.kt`, `Theme.kt`, `Type.kt`)
 - Debug APK built successfully (`app/build/outputs/apk/debug/app-debug.apk`)
 - Not a git repo. No tests. No editor/crypto code.
 
@@ -32,8 +32,7 @@ Stock Compose app template, nothing custom written yet.
 
 ## Cleanups (low priority)
 
-- Template leftovers: `MyComposeApplicationTheme`, `Greeting`, Purple/Pink palette
-- `junit` / `espresso` declared in `libs.versions.toml` but unused; no test source sets
+- Template leftovers: `MyComposeApplicationTheme` naming, Purple/Pink palette in `Color.kt`
 
 ## Not started
 
