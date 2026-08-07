@@ -9,7 +9,8 @@ Stripped back to a bare hello world. All template scaffolding is gone.
 - `com.lucasta.edit`, AGP 9.3.1, Gradle 9.7.0, Kotlin 2.4.10 (compiled by AGP's built-in Kotlin support)
 - minSdk 23, compileSdk 37, targetSdk 37
 - Compose UI and foundation 1.11.4, material3 1.4.0, core-ktx 1.19.0, lifecycle 2.11.0
-- Source is one file: `MainActivity.kt`, a `setContent { Text("Hello") }`. No theme package, no `MaterialTheme` wrapper — material3 composables fall back to their own defaults. Window background still comes from `AppTheme` in `themes.xml`.
+- Source is one file: `MainActivity.kt`, a `setContent { Text("Hello") }`. No theme package, no `MaterialTheme` wrapper — material3 composables fall back to their own defaults.
+- `AndroidManifest.xml` is currently the only XML left, after the template's unused resources were deleted. The app label is a literal string in it and the window theme points straight at the framework's `@android:style/Theme.Material.Light.NoActionBar`. The only other resources are the `ic_launcher.webp` launcher bitmaps.
 - Debug APK builds green with no compiler warnings (`app/build/outputs/apk/debug/app-debug.apk`, 11.6 MB unminified)
 - No tests, no test dependencies, no editor/crypto code yet.
 
@@ -21,7 +22,7 @@ Stripped back to a bare hello world. All template scaffolding is gone.
 ## Blockers / fix before building features
 
 1. **Edge-to-edge is enforced and unhandled.** targetSdk 37 means the app always draws behind the system bars. The offending `window.statusBarColor` code went away with `Theme.kt`, so nothing is wrong today with a single centred `Text`, but the first real UI needs `enableEdgeToEdge()` plus proper inset padding or the top of the editor will sit under the status bar.
-2. **`allowBackup="true"`** — wrong default for an encrypted-file app. `backup_rules.xml` / `data_extraction_rules.xml` exist but the manifest never references them.
+2. **`allowBackup="true"`** — wrong default for an encrypted-file app. Set it to `false` in the manifest; the unreferenced `backup_rules.xml` / `data_extraction_rules.xml` are already gone, and `false` needs no rules file at all.
 3. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built. Compose needs proguard keep rules once minify actually runs.
 
 ## Environment
