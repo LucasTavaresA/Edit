@@ -22,8 +22,7 @@ Stripped back to a bare hello world. All template scaffolding is gone.
 
 ## Blockers / fix before building features
 
-1. **`allowBackup="true"`** — wrong default for an encrypted-file app. Set it to `false` in the manifest; the unreferenced `backup_rules.xml` / `data_extraction_rules.xml` are already gone, and `false` needs no rules file at all.
-2. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built. Compose needs proguard keep rules once minify actually runs.
+1. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built. Compose needs proguard keep rules once minify actually runs.
 
 ## Environment
 
@@ -40,3 +39,4 @@ Stripped back to a bare hello world. All template scaffolding is gone.
 - `ACTION_VIEW` / `ACTION_EDIT` intent filters for text MIME types
 - Editor UI (large-file handling, undo, find)
 - Encryption: passphrase entry, KDF, envelope format, decrypt-on-open / encrypt-on-close
+- Device-to-device backup posture. `allowBackup="false"` stops cloud backup on every supported version, but from Android 12 it does not stop device-to-device transfer — that needs `android:dataExtractionRules` with a `<device-transfer>` exclude, which costs an XML file. The app persists nothing at all today, so there is nothing to leak; do this when it first stores something, such as recent files, SAF permission grants or settings.
