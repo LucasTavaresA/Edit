@@ -3,7 +3,6 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.jetbrains.kotlin.android)
     alias(libs.plugins.compose.compiler)
 }
 
@@ -18,7 +17,7 @@ val hasValidSigningProps = listOf("storeFile", "storePassword", "keyAlias", "key
 
 android {
     namespace = "com.lucasta.edit"
-    compileSdk = 36
+    compileSdk = 37
 
     lint {
         checkReleaseBuilds = false
@@ -38,7 +37,7 @@ android {
     defaultConfig {
         applicationId = "com.lucasta.edit"
         minSdk = 23
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0"
 
