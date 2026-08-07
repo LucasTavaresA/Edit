@@ -8,7 +8,7 @@ Stripped back to a bare hello world. All template scaffolding is gone.
 
 - `com.lucasta.edit`, AGP 9.3.1, Gradle 9.7.0, Kotlin 2.4.10 (compiled by AGP's built-in Kotlin support)
 - minSdk 23, compileSdk 37, targetSdk 37
-- Compose UI and foundation 1.11.4, material3 1.4.0, core-ktx 1.19.0, lifecycle 2.11.0
+- Compose UI and foundation 1.11.4, material3 1.4.0. Only four dependencies are declared — the Compose BOM, `ui`, `foundation`, `material3` and `activity-compose` — because nothing else is referenced by the source. core-ktx and lifecycle arrive transitively at 1.18.0 and 2.9.4.
 - Source is one file: `MainActivity.kt`, a `setContent { Text("Hello") }`. No theme package, no `MaterialTheme` wrapper — material3 composables fall back to their own defaults.
 - **Edge-to-edge is on for every device**, via `enableEdgeToEdge()` with a pinned `SystemBarStyle.light(TRANSPARENT, TRANSPARENT)` for both bars, and `Modifier.safeDrawingPadding()` keeping content out from under them. The style is pinned rather than `auto` because `auto` follows the system dark theme and would flip the bar icons to white while the app itself stays light. One deviation is unavoidable: dark navigation-bar icons need API 26, so on API 23–25 that bar keeps white icons. Raising minSdk to 26 would remove the last inconsistency.
 - `AndroidManifest.xml` is currently the only XML left, after the template's unused resources were deleted. The app label is a literal string in it and the window theme points straight at the framework's `@android:style/Theme.Material.Light.NoActionBar`. The only other resources are the `ic_launcher.webp` launcher bitmaps.
