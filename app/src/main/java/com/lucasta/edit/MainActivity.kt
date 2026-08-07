@@ -14,9 +14,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Pinned rather than SystemBarStyle.auto: auto follows the system dark
-        // theme, which would flip the bar icons to white on a device in dark
-        // mode while the app itself stays light.
         val bars = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
         setContent {
