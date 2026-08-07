@@ -10,6 +10,7 @@ Stripped back to a bare hello world. All template scaffolding is gone.
 - minSdk 23, compileSdk 37, targetSdk 37
 - Compose UI and foundation 1.11.4, material3 1.4.0, core-ktx 1.19.0, lifecycle 2.11.0
 - Source is one file: `MainActivity.kt`, a `setContent { Text("Hello") }`. No theme package, no `MaterialTheme` wrapper — material3 composables fall back to their own defaults.
+- **Edge-to-edge is on for every device**, via `enableEdgeToEdge()` with a pinned `SystemBarStyle.light(TRANSPARENT, TRANSPARENT)` for both bars, and `Modifier.safeDrawingPadding()` keeping content out from under them. The style is pinned rather than `auto` because `auto` follows the system dark theme and would flip the bar icons to white while the app itself stays light. One deviation is unavoidable: dark navigation-bar icons need API 26, so on API 23–25 that bar keeps white icons. Raising minSdk to 26 would remove the last inconsistency.
 - `AndroidManifest.xml` is currently the only XML left, after the template's unused resources were deleted. The app label is a literal string in it and the window theme points straight at the framework's `@android:style/Theme.Material.Light.NoActionBar`. The only other resources are the `ic_launcher.webp` launcher bitmaps.
 - Debug APK builds green with no compiler warnings (`app/build/outputs/apk/debug/app-debug.apk`, 11.6 MB unminified)
 - No tests, no test dependencies, no editor/crypto code yet.
@@ -21,9 +22,8 @@ Stripped back to a bare hello world. All template scaffolding is gone.
 
 ## Blockers / fix before building features
 
-1. **Edge-to-edge is enforced and unhandled.** targetSdk 37 means the app always draws behind the system bars. The offending `window.statusBarColor` code went away with `Theme.kt`, so nothing is wrong today with a single centred `Text`, but the first real UI needs `enableEdgeToEdge()` plus proper inset padding or the top of the editor will sit under the status bar.
-2. **`allowBackup="true"`** — wrong default for an encrypted-file app. Set it to `false` in the manifest; the unreferenced `backup_rules.xml` / `data_extraction_rules.xml` are already gone, and `false` needs no rules file at all.
-3. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built. Compose needs proguard keep rules once minify actually runs.
+1. **`allowBackup="true"`** — wrong default for an encrypted-file app. Set it to `false` in the manifest; the unreferenced `backup_rules.xml` / `data_extraction_rules.xml` are already gone, and `false` needs no rules file at all.
+2. **Release build unverified.** `isMinifyEnabled = true` with empty proguard rules and `lint.checkReleaseBuilds = false`; only debug has been built. Compose needs proguard keep rules once minify actually runs.
 
 ## Environment
 
