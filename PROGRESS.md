@@ -9,7 +9,7 @@ A working bare editor: open a file, edit it, save it.
 - `com.lucasta.edit`, AGP 9.3.1, Gradle 9.7.0, Kotlin 2.4.10 (compiled by AGP's built-in Kotlin support)
 - minSdk 26, compileSdk 37, targetSdk 37
 - Compose UI and foundation 1.11.4, material3 1.4.0. Five dependencies are declared — the Compose BOM, `ui`, `foundation`, `material3`, `activity-compose` and `kotlinx-coroutines-android` — matching what the source imports. core-ktx and lifecycle arrive transitively at 1.18.0 and 2.9.4.
-- Source is two files: `MainActivity.kt` (edge-to-edge setup and the editor UI) and `TextFile.kt` (read, write, display name). No theme package, no `MaterialTheme` wrapper — material3 composables fall back to their own defaults.
+- Source is two files: `MainActivity.kt` (edge-to-edge setup and the editor UI) and `TextFile.kt` (encoding detection, strict read, write, display name). No theme package, no `MaterialTheme` wrapper — material3 composables fall back to their own defaults.
 - **Edge-to-edge is on for every device**, via `enableEdgeToEdge()` with a pinned `SystemBarStyle.light(TRANSPARENT, TRANSPARENT)` for both bars, and `Modifier.safeDrawingPadding()` keeping content out from under them. The style is pinned rather than `auto` because `auto` follows the system dark theme and would flip the bar icons to white while the app itself stays light. Dark icons on both bars need API 26, which is minSdk, so every supported device gets transparent bars with dark icons and the fallback colour is never reached.
 - `AndroidManifest.xml` is currently the only XML left, after the template's unused resources were deleted. The app label is a literal string in it and the window theme points straight at the framework's `@android:style/Theme.Material.Light.NoActionBar`. The only other resources are the `ic_launcher.webp` launcher bitmaps.
 - Debug APK builds green with no compiler warnings (`app/build/outputs/apk/debug/app-debug.apk`, 11.6 MB unminified)
@@ -34,10 +34,10 @@ A working bare editor: open a file, edit it, save it.
 
 ## Known limits of the current editor
 
-1. **Opening a non-UTF-8 file and saving it destroys it.** Bad bytes decode to U+FFFD and get written back as replacement characters. Opening everything as plain text is the point of the app, so this needs a real answer — detect non-text content and refuse to save, or hold the original bytes and rewrite only what changed. Most urgent of these.
-2. No unsaved-changes tracking, so opening a second file silently throws away edits to the first.
-3. The whole file is read into one String, so large files will hurt.
-4. UTF-8 is assumed on both read and write; no BOM or charset detection.
+1. **Only files that survive a byte-exact round trip will open at all.** A file with a few corrupt bytes is refused outright, even though it might be worth reading. There is a TODO in `TextFile.kt` for offering to open it anyway as a deliberate choice, with a clear warning that saving will rewrite the bytes that could not be represented and that a backup must exist first.
+2. Legacy single-byte encodings are rejected. Latin-1 and Windows-1252 accept any byte sequence, so they cannot be detected, only guessed at. A file of Latin-1 accented text will simply refuse to open.
+3. No unsaved-changes tracking, so opening a second file silently throws away edits to the first.
+4. The whole file is read into one String, so large files will hurt.
 5. No persistable URI permission is taken, so a file cannot be reopened after the process dies. Harmless until there is a recent-files list to reopen from.
 
 ## Not started

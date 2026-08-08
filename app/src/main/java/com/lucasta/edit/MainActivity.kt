@@ -48,14 +48,16 @@ private fun Editor() {
     val text = rememberTextFieldState()
     var file by remember { mutableStateOf<Uri?>(null) }
     var name by remember { mutableStateOf("untitled.txt") }
+    var encoding by remember { mutableStateOf(Encoding.Utf8) }
     var status by remember { mutableStateOf("no file") }
 
     val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
         picked ?: return@rememberLauncherForActivityResult
         scope.launch {
-            readText(context, picked)
+            readDocument(context, picked)
                 .onSuccess {
-                    text.setTextAndPlaceCursorAtEnd(it)
+                    text.setTextAndPlaceCursorAtEnd(it.text)
+                    encoding = it.encoding
                     file = picked
                     name = displayName(context, picked)
                     status = name
@@ -67,7 +69,7 @@ private fun Editor() {
     val saveAs = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { created ->
         created ?: return@rememberLauncherForActivityResult
         scope.launch {
-            writeText(context, created, text.text.toString())
+            writeDocument(context, created, TextDocument(text.text.toString(), encoding))
                 .onSuccess {
                     file = created
                     name = displayName(context, created)
@@ -80,7 +82,7 @@ private fun Editor() {
     fun save() {
         val target = file ?: return
         scope.launch {
-            writeText(context, target, text.text.toString())
+            writeDocument(context, target, TextDocument(text.text.toString(), encoding))
                 .onSuccess { status = "saved $name" }
                 .onFailure { status = "could not save: ${it.message}" }
         }
