@@ -1,6 +1,6 @@
 # PROGRESS
 
-Progress tracker for **Edit** — a bare text editor for Android that opens and closes encrypted files in a format any tool can read and sync, open everything else as plain text.
+Progress tracker for **Edit** — a bare text editor for Android that opens and closes encrypted files in a format any tool can read and sync.
 
 ## Where the project stands
 
@@ -11,9 +11,8 @@ A working bare editor: open a file, edit it, save it.
 - Compose UI and foundation 1.11.4, material3 1.4.0. Five dependencies are declared — the Compose BOM, `ui`, `foundation`, `material3`, `activity-compose` and `kotlinx-coroutines-android` — matching what the source imports. core-ktx and lifecycle arrive transitively at 1.18.0 and 2.9.4.
 - Source is two files: `MainActivity.kt` (edge-to-edge setup and the editor UI) and `TextFile.kt` (encoding detection, strict read, write, display name). No theme package, no `MaterialTheme` wrapper — material3 composables fall back to their own defaults.
 - **Edge-to-edge is on for every device**, via `enableEdgeToEdge()` with a pinned `SystemBarStyle.light(TRANSPARENT, TRANSPARENT)` for both bars, and `Modifier.safeDrawingPadding()` keeping content out from under them. The style is pinned rather than `auto` because `auto` follows the system dark theme and would flip the bar icons to white while the app itself stays light. Dark icons on both bars need API 26, which is minSdk, so every supported device gets transparent bars with dark icons and the fallback colour is never reached.
-- `AndroidManifest.xml` is currently the only XML left, after the template's unused resources were deleted. The app label is a literal string in it and the window theme points straight at the framework's `@android:style/Theme.Material.Light.NoActionBar`. The only other resources are the `ic_launcher.webp` launcher bitmaps.
-- Debug APK builds green with no compiler warnings (`app/build/outputs/apk/debug/app-debug.apk`, 11.6 MB unminified)
-- Release builds too, minified by R8 and signed, at 1.2 MB. No proguard rules of our own were needed — AndroidX and Compose ship their own consumer rules. Verified by dumping the APK, then installed by hand and confirmed running.
+- Debug APK builds green with no compiler warnings (`app/build/outputs/apk/debug/app-debug.apk`, 11.5 MB unminified), about 2m40s from clean
+- Release builds too, minified by R8 and signed, at 1.5 MB. No proguard rules of our own were needed — AndroidX and Compose ship their own consumer rules. Verified by dumping the APK and by `apksigner verify` (v2 scheme). Not yet installed from the termux toolchain.
 - No tests and no test dependencies. No crypto code yet.
 
 ## Design decisions
@@ -23,14 +22,17 @@ A working bare editor: open a file, edit it, save it.
 
 ## Environment
 
-- Git needs `git config --global --add safe.directory <project dir>` for anything under `/storage/emulated/0` — sdcardfs reports an owner git refuses to trust. Every new project dir needs its own line.
-- `/storage/emulated/0` is mounted noexec, so scripts there never keep the exec bit; run them as `bash script.sh`.
-- **`android.enableResourceOptimizations=false` is load-bearing.** AGP 9's `optimizeReleaseResources` drives `aapt2 optimize`, and the aapt2 here is a hand-built 2.19 from build-tools 35 while AGP 9 expects 36. The mismatch does not error — it produces an APK with no `AndroidManifest.xml`, no `resources.arsc` and no signature, while Gradle still reports BUILD SUCCESSFUL. Never trust a green release build alone; dump the APK. Debug is unaffected because it never runs that task.
-- **Nothing can be installed from the shell.** The uid here is a normal app, not shell, so `pm install` fails: system server cannot read FUSE storage by path, and streaming via stdin dies in `PackageInstallerService` because a non-shell uid has no installer package. `file://` intents to the package installer do not resolve either. Release APKs get copied to `/storage/emulated/0/Download/` to be tapped by hand.
-- Gradle from the shell needs `-Pandroid.aapt2FromMavenOverride="$ANDROID_HOME/build-tools/35.0.0/aapt2"`. The Maven aapt2 is a glibc binary that cannot run under bionic, so without this every build dies in `processDebugResources`. Add `--no-daemon --max-workers=1 -Dorg.gradle.jvmargs="-Xmx1536m"` to avoid running out of memory. A clean debug build is roughly 3 minutes, so expect a background run rather than a foreground one.
-- **AGP 9 compiles Kotlin itself.** Applying `org.jetbrains.kotlin.android` is now a hard error, not a deprecation. Only `com.android.application` and `org.jetbrains.kotlin.plugin.compose` are applied. The `kotlin { compilerOptions { } }` block still works because AGP provides it.
-- **The SDK is hand-assembled and has no `sdkmanager`.** `platforms/android-37.0` was downloaded from `dl.google.com/android/repository/platform-37.0_r02.zip` and unzipped by hand. Note `compileSdk = 37` resolves to `android-37.0` specifically — `android-37.1` (the Android 17 minor release, also installed) does not satisfy it.
-- **`build-tools/36.0.0` is x86_64 Linux binaries and cannot execute on this device.** AGP 9 requires build-tools 36+, and Google publishes them only for linux/macos/windows — the aarch64 `35.0.0` in use is a hand-compiled build. Installing the unusable 36.0.0 satisfies AGP's version check while real work goes through the overridden aarch64 aapt2 and AGP's own JVM-based D8/R8/apksigner. Builds pass, but this is a hack: any future AGP task that shells out to a native build-tools binary will fail with an exec format error.
+Everything below is plain `pkg install` or a stock SDK — no hand-assembled pieces, no version fictions, nothing that needs to be worked around.
+
+- **Build with `gradle assembleDebug` or `gradle assembleRelease` from the project root.** No flags, no property overrides on the command line. A clean build of either is about 2m40s, which is long enough to want a background run.
+- Gradle 9.7.0 comes from `pkg install gradle` — the same version `gradle-wrapper.properties` pins. `gradlew` is still in the repo and correct for anyone else, but the wrapper distribution was never downloaded here, so `./gradlew` would pull 130 MB from `services.gradle.org` to arrive at the same Gradle. The termux mirror runs about 10x faster than Google's, which is why the packaged one won.
+- JDK is `openjdk-21` (21.0.12). AGP compiles to JVM 17 bytecode regardless, per `compileOptions` and the `kotlin` block.
+- **aapt2 is `pkg install aapt2`**, a native aarch64 build reporting `2.20-android-16.0.0_r4` — genuinely build-tools 36 era, which is what AGP 9 expects. `optimizeReleaseResources` runs and produces a correct APK, so the old `android.enableResourceOptimizations=false` workaround is gone.
+- The one setting that has to stay is `android.aapt2FromMavenOverride`, pointing at `/data/data/com.termux/files/usr/bin/aapt2`. AGP's own aapt2 comes from Maven as a glibc x86_64 binary that cannot run under bionic, so without the override every build dies in `processDebugResources`. It lives in `~/.gradle/gradle.properties`, not in the repo, because it is an absolute path for this machine only.
+- **SDK is at `~/android-sdk`, installed by a real `sdkmanager`** (cmdline-tools 22.0). `local.properties` points at it, so no `ANDROID_HOME` is needed. The cmdline-tools scripts ship a `#!/usr/bin/env` shebang that termux cannot resolve; `termux-fix-shebang` on `cmdline-tools/latest/bin/*` fixes it once.
+- `platforms;android-37.0` is installed properly, with `package.xml`. `compileSdk = 37` resolves to `android-37.0` specifically — `android-37.1`, the Android 17 minor release, does not satisfy it.
+- **AGP auto-installs `build-tools;36.0.0` and `platform-tools`, and both are x86_64.** Nothing executes them: aapt2 comes from the override and D8, R8 and apksigner are JVM tools. The debug build in fact succeeded before build-tools existed at all. Worth remembering only if some future AGP task shells out to a native build-tools binary, which would fail with an exec format error.
+- `adb` is `pkg install android-tools`, a native aarch64 build. There is no device attached yet — reaching the device adb runs on needs Wireless debugging turned on in Developer options and a one-time pairing.
 
 ## Known limits of the current editor
 
