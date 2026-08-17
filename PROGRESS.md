@@ -30,6 +30,8 @@ Everything below is plain `pkg install` or a stock SDK — no hand-assembled pie
 
 - **Build with `gradle assembleDebug` from the project root.** No flags, no property overrides on the command line. A clean build is about 2m40s, which is long enough to want a background run; incremental is well under a minute.
 - **`gradle assembleRelease` gets the low-memory killer to take out everything on the device**, including the terminal, even with Termux set to unrestricted power mode. R8 plus the AGP daemon on top of an already loaded device is simply too much. So release is not a build we run to check our work — that is what the debug app is for. Only build release when there is an actual reason to ship one, expect to lose the session when you do, and do not casually run it for verification.
+- **Lint has to be asked for, and costs 13 minutes.** `assembleDebug` does not run it and `lint { checkReleaseBuilds = false }` disables the release hook, so nothing in the normal flow ever checks. `gradle lintDebug` works — 13m 5s cold, no OOM, so it is safe to run unlike release — and writes `app/build/reports/lint-results-debug.{html,sarif}`. It prints nothing useful to the console; read the SARIF. Worth running occasionally rather than never, but not per change.
+- **`ObsoleteSdkInt` is the check that catches a version gate outliving its minSdk.** Verified for real by temporarily setting `minSdk = 31` and running lint, which reported `MainActivity.kt: Unnecessary; SDK_INT is always >= 31` against the dynamic-colour gate, then reverting. So the dynamic-colour branch will not silently rot — but only if someone runs lint, per the point above. Note it is a warning, not an error, and lint does not fail the build on it.
 - **`adb shell cmd uimode night yes|no` flips the system dark theme**, which is how the light and dark paths were both checked without touching the phone by hand. It is a global setting, so put it back when done.
 - Gradle 9.7.0 comes from `pkg install gradle` — the same version `gradle-wrapper.properties` pins. `gradlew` is still in the repo and correct for anyone else, but the wrapper distribution was never downloaded here, so `./gradlew` would pull 130 MB from `services.gradle.org` to arrive at the same Gradle. The termux mirror runs about 10x faster than Google's, which is why the packaged one won.
 - JDK is `openjdk-21` (21.0.12). AGP compiles to JVM 17 bytecode regardless, per `compileOptions` and the `kotlin` block.
@@ -52,6 +54,14 @@ Everything below is plain `pkg install` or a stock SDK — no hand-assembled pie
 3. No unsaved-changes tracking, so opening a second file silently throws away edits to the first.
 4. The whole file is read into one String, so large files will hurt.
 5. No persistable URI permission is taken, so a file cannot be reopened after the process dies. Harmless until there is a recent-files list to reopen from.
+
+## Open lint findings
+
+From the first ever lint run. Three at the real `minSdk = 26`; none are errors and none block anything.
+
+1. `NotShrinkingResources` — release sets `isMinifyEnabled = true` without `isShrinkResources = true`, so R8 strips code but unused resources stay in the APK. Nearly free size win, but it only lands in a release build, which is the build we cannot run casually.
+2. `DataExtractionRules` — the same point already noted under "Not started": `allowBackup` is deprecated from Android 12 and does not cover device-to-device transfer.
+3. `GradleDependency` — Compose BOM 2026.06.01 has a newer 2026.08.00.
 
 ## Not started
 
