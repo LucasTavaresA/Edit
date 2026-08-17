@@ -48,7 +48,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", "Edit debug")
+        }
         release {
+            resValue("string", "app_name", "Edit")
             if (hasValidSigningProps) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -59,6 +65,7 @@ android {
 
     buildFeatures {
         compose = true
+        resValues = true
     }
 
     packaging {
