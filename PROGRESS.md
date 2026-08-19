@@ -55,6 +55,7 @@ Everything below is plain `pkg install` or a stock SDK — no hand-assembled pie
 8. **Scrolling away from the cursor closes the keyboard**, because the window row is a `LazyColumn` item and scrolling it off screen disposes it. The cursor and the edit survive; only the focus does not.
 9. **Typing thousands of characters at the very end of a file grows the window** instead of moving it, since there is nothing after it to move into, and a growing window is a growing per-keystroke layout.
 10. An edit shifts the offsets of every chunk after it, and the list is keyed on those offsets, so the scroll position can jump by a row or two when a window is committed while its neighbours are on screen.
+11. **Tap in the topmost visible chunk and the window has no reach backwards**, because it may not start above the row the list is anchored on, so deleting or moving past the top of the screen does nothing until the view is scrolled up. The fix is to scroll first and then extend, and what makes it work is knowing where to put the view afterwards: that needs the pixel height of the chunk being put in front, which is not known until it has been laid out — so either heights are remembered as chunks scroll past, or the view goes somewhere defensible instead, like the window's own start at the top.
 
 ## How the text is laid out
 
@@ -66,6 +67,7 @@ The document is still one flat run of characters. What changed is that it is no 
 - **Rows.** `DocumentEditor` is a `LazyColumn` of chunks, so only the chunks on screen are ever measured and scrolling recycles them. Fling and jump-to-anywhere come from `LazyColumn` for free.
 - **The window.** One slice of the document — the chunk the cursor is in plus `WINDOW_CHUNKS` either side, about 6 KB — is a real `BasicTextField` and takes all the input, so IME, selection handles, magnifier and autocorrect are Compose's and not ours. Every other row is read-only `BasicText` that turns into the window when tapped. The window follows the cursor: come within `WINDOW_GUARD` characters of its edge and it is flushed back into the document and reopened around the cursor. So no action is confined to where it started — only a single drag-selection is, and only at the window's edges, which is about a hundred lines away rather than one line.
 - **Encrypted documents opt out of all of it.** `load(whole = true)` gives the document a single chunk, so the window is the whole file and the layout is exactly what it was before chunking existed. See the design decisions for why.
+- **The list holds its place by the key of the row at the top of the screen, so the window may never start above that row** — a row the window covers stops being a row, and the list then falls back on row numbers, which mean somewhere else once the window has collapsed a few rows here and given a few back there. That was the jump when tapping after a long scroll.
 - **`WINDOW_CHUNKS` is the dial.** The window is the only text a keystroke lays out again, so raising it buys a longer drag-selection and costs typing latency, at roughly 4 µs per character of window. Nobody has measured typing latency yet.
 
 ## Speed of opening
@@ -111,6 +113,8 @@ The read and write paths were both rewritten, so both were checked end to end ra
 - A file with a bad byte is refused with `not valid text`. The strict decode survived the rewrite.
 - Both caps refuse with the right message and the right limit: 64 MB and 128 MB plain over 32 MB, a 292 KB age-magic file over 128 KB. A 60 KB age-magic file gets past the size check to `encrypted files cannot be opened yet`, which is the sniff working.
 - 32 MB — the cap — opens in 1.1 s.
+- Scrolling a long way and tapping a line leaves the line where it was tapped, in both directions.
+- **The keyboard closes and reopens whenever the window moves**, since the window row is keyed on where it starts and moving it builds a new field with a new input session. Judged smooth enough to leave alone.
 - **Save round trips are byte-identical**: UTF-8, UTF-16LE with its BOM, and a 16 MB file, all `cmp`-clean against a copy taken before saving, with the process staying at 189 MB PSS through the 16 MB write, which is the streaming write not copying anything.
 
 ## Not verified yet

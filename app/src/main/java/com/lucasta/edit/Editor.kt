@@ -107,6 +107,21 @@ class DocumentState {
     /** The line break at the end of the window's range, which the field itself does not hold. */
     private var windowBreak = 0
 
+    /**
+     * Where the row at the top of the screen starts, kept current by [DocumentEditor].
+     *
+     * The list holds its scroll position by remembering the key of that row and finding it again
+     * after the rows change. A window that swallowed that row would leave it with nothing to hold
+     * on to, and it would fall back on the row's old number — which by then points somewhere else,
+     * because the window it just left expanded back into chunks and the one it opened collapsed a
+     * few into one. That is the jump: tap near the top of the screen and the text lurches by a
+     * couple of chunks, and then the cursor is dragged back into view at whichever edge it went
+     * out of. So the window is never allowed to start above this row. See [open].
+     *
+     * Not a snapshot state: it changes with every scrolled pixel and nothing is drawn from it.
+     */
+    var visibleFrom = 0
+
     private var focusWanted = false
 
     /** Set while the buffer is being written out, when it must not be touched. */
@@ -130,6 +145,7 @@ class DocumentState {
         windowStart = -1
         windowEnd = -1
         windowBreak = 0
+        visibleFrom = 0
         buffer = value as? StringBuilder ?: StringBuilder(value)
         chunks = starts
         generation++
@@ -163,7 +179,9 @@ class DocumentState {
     /**
      * Keeps the cursor clear of the window edges, so that typing, deleting and moving never run out
      * of editable text. Left alone while a selection is being dragged, since moving the window
-     * under a drag would fight the gesture.
+     * under a drag would fight the gesture, and left alone when the window is already where it
+     * would reopen — against the top of the screen it has nowhere to go, and reopening it there
+     * would rewrite the field's text under the cursor on every keystroke for nothing.
      */
     fun follow() {
         if (writing || windowStart < 0) return
@@ -173,6 +191,7 @@ class DocumentState {
         val nearEnd = selection.max > window.text.length - WINDOW_GUARD && windowEnd < buffer.length
         if (!nearStart && !nearEnd) return
         val at = windowStart + selection.min
+        if (chunks[windowFirst(chunkIndexAt(chunks, at))] == windowStart) return
         flush()
         open(at)
     }
@@ -198,14 +217,23 @@ class DocumentState {
         val delta = window.text.length + windowBreak - (was - windowStart)
         buffer.replace(windowStart, was - windowBreak, window.text.toString())
         windowEnd = was + delta
+        if (visibleFrom >= was) visibleFrom += delta
         chunks = if (whole) intArrayOf(0) else respan(chunks, windowStart, was, buffer, delta)
         version++
     }
 
+    /**
+     * Puts the window around [offset]. It takes [WINDOW_CHUNKS] chunks either side of the one the
+     * cursor is in, except that it never reaches back past [visibleFrom]: the row the list is
+     * anchored on has to survive the move, and a row the window covers stops being a row. Giving up
+     * chunks before the cursor costs backward slack — see the note on [visibleFrom] for what is
+     * being bought with it — and the ones after the cursor are untouched, so a window that opens
+     * against the top of the screen still has its full reach forward.
+     */
     private fun open(offset: Int, selection: TextRange? = null) {
         val at = offset.coerceIn(0, buffer.length)
         val index = chunkIndexAt(chunks, at)
-        val first = (index - WINDOW_CHUNKS).coerceAtLeast(0)
+        val first = windowFirst(index)
         val last = (index + WINDOW_CHUNKS).coerceAtMost(chunks.size - 1)
         windowStart = chunks[first]
         windowEnd = chunkEndAt(chunks, last, buffer.length)
@@ -225,6 +253,12 @@ class DocumentState {
             this.selection = local
         }
         focusWanted = true
+    }
+
+    /** First chunk of a window holding the cursor's chunk [index], clamped as [open] describes. */
+    private fun windowFirst(index: Int): Int {
+        val anchor = chunkIndexAt(chunks, visibleFrom.coerceIn(0, buffer.length))
+        return (index - WINDOW_CHUNKS).coerceIn(minOf(anchor, index), index)
     }
 
     /** An offset past an open window has moved by whatever the window's own length has changed by. */
@@ -265,8 +299,16 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
     }
     val list = rememberLazyListState()
     LaunchedEffect(state.generation) { list.scrollToItem(0) }
+    LaunchedEffect(list, state) {
+        snapshotFlow { list.layoutInfo.visibleItemsInfo.firstOrNull()?.key }
+            .collect { key -> (key as? Int)?.let { state.visibleFrom = it } }
+    }
+    // Every row is keyed on where it starts, the window included, so a key always means the same
+    // place in the document. Keying the window on itself instead would let the list follow it
+    // across the file: with the window at the top of the screen, tapping anything below would take
+    // the anchor along and land the tap wherever the window went.
     LazyColumn(modifier, state = list) {
-        items(rows.size, key = { if (rows[it].editable) "window" else rows[it].start }) { index ->
+        items(rows.size, key = { rows[it].start }) { index ->
             val row = rows[index]
             if (row.editable) WindowRow(state) else ChunkRow(state, row)
         }
