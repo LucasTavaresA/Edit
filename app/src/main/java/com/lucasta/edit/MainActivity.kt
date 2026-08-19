@@ -1,7 +1,6 @@
 package com.lucasta.edit
 
 import android.content.Intent
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -35,15 +34,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import android.graphics.Color as ArgbColor
 
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val bars = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
+        val bars = SystemBarStyle.auto(ArgbColor.TRANSPARENT, ArgbColor.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
         val opened = when (intent?.action) {
             Intent.ACTION_VIEW, Intent.ACTION_EDIT -> intent.data
@@ -63,12 +64,35 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorScheme {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    val scheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val context = LocalContext.current
-        return if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    } else {
+        if (dark) darkColorScheme() else lightColorScheme()
     }
-    return if (dark) darkColorScheme() else lightColorScheme()
+    return if (dark) scheme.unlit() else scheme
 }
+
+/**
+ * The same scheme with every ground it paints taken to pure black. On an OLED panel a black
+ * pixel is an unlit pixel: dark mode costs nothing but the text drawn on it, and the dark greys
+ * Material would otherwise use light the whole screen up. Only the grounds move — what is drawn on
+ * them keeps the colours the scheme chose, so contrast goes up rather than down. [surfaceTint] goes
+ * black as well, since that is the colour elevation would use to lift a surface back off the black.
+ */
+private fun ColorScheme.unlit(): ColorScheme = copy(
+    background = Color.Black,
+    surface = Color.Black,
+    surfaceVariant = Color.Black,
+    surfaceTint = Color.Black,
+    surfaceBright = Color.Black,
+    surfaceDim = Color.Black,
+    surfaceContainer = Color.Black,
+    surfaceContainerLowest = Color.Black,
+    surfaceContainerLow = Color.Black,
+    surfaceContainerHigh = Color.Black,
+    surfaceContainerHighest = Color.Black,
+)
 
 /** What a document that has never been saved is called, and what Save as offers for it. */
 private const val UNTITLED = "untitled.txt"

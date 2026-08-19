@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Edit" parent="@android:style/Theme.Material.NoActionBar" />
+    <style name="Theme.Edit" parent="@android:style/Theme.Material.NoActionBar">
+        <!-- What the window shows before Compose has drawn anything. Material's own is a dark
+             grey, which flashes lit on an OLED panel on the way into a black editor. -->
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>
