@@ -23,6 +23,8 @@ A working bare editor: open a file, edit it, save it.
 
 ## Environment
 
+- **One UI publishes the phone's accent in the old palette resources and not in the new role ones, so Compose's dynamic colour misses it.** There are two sets: the `system_accent1_*` tonal ramp from API 31, and the colour roles API 34 added on top — `system_primary_dark`, `system_primary_light` and the rest. Compose reads the roles where they exist. One UI fills in only the ramp, leaving the roles at the AOSP default blue, so `dynamicDarkColorScheme` hands back a blue that has nothing to do with the phone. The accent is published and simply not looked at; reading the ramp and mapping the tones the way Material does gets it back. The neutrals are split the same way and nothing here is drawn in them, so they are left as they come. **`adb shell cmd overlay lookup <package> android:color/<name>` answers what a given app resolves a framework colour to**, which is how this was pinned down without a build — and it disagreeing with what the app draws is itself the finding.
+
 Everything below is plain `pkg install` or a stock SDK — no hand-assembled pieces, no version fictions, nothing that needs to be worked around.
 
 - **`gradle assembleRelease` gets the low-memory killer to take out everything on the device**, including the terminal, even with Termux set to unrestricted power mode. So release is not a build we run to check our work — that is what the debug app is for. Only build release when there is an actual reason to ship one, expect to lose the session when you do, and do not casually run it for verification.

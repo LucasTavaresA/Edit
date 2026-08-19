@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -68,13 +69,46 @@ class MainActivity : ComponentActivity() {
 private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorScheme {
     val scheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         val context = LocalContext.current
-        if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        val dynamic = if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        dynamic.accentedLikeTheSystem(dark)
     } else {
         if (dark) darkColorScheme() else lightColorScheme()
     }
     // The rule under the toolbar draws itself with outlineVariant, and Material's is a grey faint
     // enough to be lost against either ground. It wants the plain opposite of what it sits on.
     return if (dark) scheme.unlit() else scheme.copy(outlineVariant = Color.Black)
+}
+
+/**
+ * The primary family taken off the tonal ramp the phone actually publishes, because the scheme it
+ * came from has the wrong accent on One UI. There are two sets of system colours: the old
+ * `system_accent1_*` ramp, and the colour roles API 34 added on top of it — `system_primary_dark`
+ * and the rest. Compose prefers the roles where they exist, but One UI fills in only the ramp and
+ * leaves the roles at the AOSP default, so the phone's accent is published and simply not looked
+ * at. Reading the ramp and mapping the tones the way Material does puts it back.
+ *
+ * Only the primary family is corrected: it is the accent the toolbar is drawn in, and the rest of
+ * the app is text on a ground. The neutrals have the same split and are left alone for the same
+ * reason — nothing here is drawn in them that would show the difference.
+ */
+@RequiresApi(Build.VERSION_CODES.S)
+@Composable
+private fun ColorScheme.accentedLikeTheSystem(dark: Boolean): ColorScheme {
+    val resources = LocalContext.current.resources
+    fun tone(id: Int) = Color(resources.getColor(id, null))
+    return if (dark) copy(
+        primary = tone(android.R.color.system_accent1_200),
+        onPrimary = tone(android.R.color.system_accent1_800),
+        primaryContainer = tone(android.R.color.system_accent1_700),
+        onPrimaryContainer = tone(android.R.color.system_accent1_100),
+        inversePrimary = tone(android.R.color.system_accent1_600),
+    ) else copy(
+        primary = tone(android.R.color.system_accent1_600),
+        onPrimary = tone(android.R.color.system_accent1_0),
+        primaryContainer = tone(android.R.color.system_accent1_100),
+        onPrimaryContainer = tone(android.R.color.system_accent1_900),
+        inversePrimary = tone(android.R.color.system_accent1_200),
+    )
 }
 
 /**
