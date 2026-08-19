@@ -29,6 +29,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
+import java.io.Closeable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -46,8 +47,8 @@ private const val WINDOW_GUARD = 256
 /**
  * Documents at least this long are indexed on a background thread, so that opening one never
  * freezes the UI. Below it the hop off the main thread and back costs more than the scan does: a
- * 64 KB file indexes in 15-30 ms, where a cold `Dispatchers.Default` thread takes a few hundred
- * milliseconds to get going and hand the answer back.
+ * 64 KB file indexes in 15-30 ms, where a cold dispatcher thread takes a few hundred milliseconds
+ * to get going and hand the answer back.
  */
 private const val INDEX_OFF_THREAD = 256 * 1024
 
@@ -55,31 +56,26 @@ private const val INDEX_OFF_THREAD = 256 * 1024
 private val TAIL = 160.dp
 
 /**
- * The whole document, plus the slice of it that is currently editable.
+ * The document, plus the slice of it that is currently editable.
  *
- * The document is one flat run of characters, as it always was, in a `StringBuilder` rather than a
- * `String`: an edit is then one arraycopy inside an array that already exists, where rebuilding a
- * String meant allocating the whole file and throwing away the whole file every time the window
- * moved. It is not a structure that needs maintaining — no pieces, no index of the text itself —
- * and it lives exactly as long as the open file does.
+ * The document is a [Content]: the file where it lies plus the changes made to it, addressed in
+ * bytes. Nothing here holds the text of the file — a row is decoded when it is drawn and thrown
+ * away when it scrolls off, and what is in memory measures the editing rather than the file.
  *
  * On top of it sits a window — a few chunks around the cursor, held in a [TextFieldState] — which
  * is what actually takes input. Every other chunk on screen is laid out read-only, and everything
- * off screen is not laid out at all. The window is flushed back into the buffer whenever it moves,
- * so an edit is never confined to where it started: only one drag-selection is, and only at the
- * window's edges.
+ * off screen is not laid out at all. The window is committed back into the document whenever it
+ * moves, so an edit is never confined to where it started: only one drag-selection is, and only at
+ * the window's edges.
+ *
+ * Every offset in here is a byte offset into the document. The window's own are characters, because
+ * that is what a text field deals in, and [Slice] is what crosses between the two.
  */
 @Stable
-class DocumentState {
+class DocumentState : Closeable {
 
-    /**
-     * The document. Handed over by whatever read it, never copied out of: `load` adopts the buffer
-     * the reader filled and saving writes this very object, so a 64 MB file exists once.
-     */
-    private var buffer = StringBuilder()
-
-    /** The document, to read. Whatever needs a real String has to ask for one. */
-    val text: CharSequence get() = buffer
+    var content: Content by mutableStateOf(Content.empty())
+        private set
 
     var chunks: IntArray by mutableStateOf(intArrayOf(0))
         private set
@@ -89,22 +85,26 @@ class DocumentState {
         private set
 
     /**
-     * Bumped whenever the buffer changes. The buffer is written in place, so there is no new object
-     * for Compose to notice; everything drawn from it is keyed on this instead.
+     * Bumped whenever the document changes. Nothing drawn from it is a value Compose can compare —
+     * a row is a range of bytes and the bytes are behind a descriptor — so everything drawn from it
+     * is keyed on this instead.
      */
     var version by mutableIntStateOf(0)
         private set
 
     val window = TextFieldState()
 
-    /** Range of the buffer the window stands in for, or -1 when nothing is focused. */
+    /** Range of the document the window stands in for, or -1 when nothing is focused. */
     var windowStart by mutableIntStateOf(-1)
         private set
 
     var windowEnd by mutableIntStateOf(-1)
         private set
 
-    /** The line break at the end of the window's range, which the field itself does not hold. */
+    /** What the window was given, which is what an edit to it is measured against. */
+    private var windowSlice = Slice("", 0, Encoding.Utf8, intArrayOf(0, 0))
+
+    /** The line break at the end of the window's range, in bytes, which the field does not hold. */
     private var windowBreak = 0
 
     /**
@@ -124,7 +124,7 @@ class DocumentState {
 
     private var focusWanted = false
 
-    /** Set while the buffer is being written out, when it must not be touched. */
+    /** Set while the document is being written out, when it must not be changed. */
     private var writing = false
 
     /**
@@ -135,44 +135,46 @@ class DocumentState {
      */
     private var whole = false
 
-    suspend fun load(value: CharSequence, whole: Boolean = false) {
+    suspend fun load(value: Content, whole: Boolean = false) {
         val starts = when {
             whole -> intArrayOf(0)
-            value.length < INDEX_OFF_THREAD -> timed("index") { chunkStarts(value) }
-            else -> withContext(Dispatchers.Default) { timed("index") { chunkStarts(value) } }
+            value.length < INDEX_OFF_THREAD -> timed("index") { chunkStarts(value, 0, value.length, value.encoding) }
+            else -> withContext(Dispatchers.IO) { timed("index") { chunkStarts(value, 0, value.length, value.encoding) } }
         }
+        if (value !== content) content.close()
         this.whole = whole
         windowStart = -1
         windowEnd = -1
         windowBreak = 0
+        windowSlice = Slice("", 0, value.encoding, intArrayOf(0, 0))
         visibleFrom = 0
-        buffer = value as? StringBuilder ?: StringBuilder(value)
+        content = value
         chunks = starts
         generation++
         version++
     }
 
     /**
-     * Runs [write] against the document as it stands, window edits included. The buffer itself is
-     * what gets passed, so nothing may change it while [write] runs: the window keeps taking
-     * keystrokes, but it cannot be flushed or moved until the write is done.
+     * Runs [write] against the document as it stands, window edits included. Nothing may change it
+     * while [write] runs: the window keeps taking keystrokes, but it cannot be committed or moved
+     * until the write is done.
      */
-    suspend fun <T> withText(write: suspend (CharSequence) -> T): T {
-        flush()
+    suspend fun <T> withContent(write: suspend (Content) -> T): T {
+        commit()
         writing = true
         return try {
-            write(buffer)
+            write(content)
         } finally {
             writing = false
         }
     }
 
-    /** Puts the cursor at [offset], moving the window there. [selection] and [offset] are document offsets. */
+    /** Puts the cursor at [offset], moving the window there. Both offsets are the document's bytes. */
     fun focus(offset: Int, selection: TextRange? = null) {
         if (writing) return
         val at = shifted(offset)
         val range = selection?.let { TextRange(shifted(it.start), shifted(it.end)) }
-        flush()
+        commit()
         open(at, range)
     }
 
@@ -188,12 +190,16 @@ class DocumentState {
         val selection = window.selection
         if (!selection.collapsed) return
         val nearStart = selection.min < WINDOW_GUARD && windowStart > 0
-        val nearEnd = selection.max > window.text.length - WINDOW_GUARD && windowEnd < buffer.length
+        val nearEnd = selection.max > window.text.length - WINDOW_GUARD && windowEnd < content.length
         if (!nearStart && !nearEnd) return
-        val at = windowStart + selection.min
-        if (chunks[windowFirst(chunkIndexAt(chunks, at))] == windowStart) return
-        flush()
-        open(at)
+        // Where the cursor is, closely enough to decide which chunks the window should cover. It
+        // has to be answered before committing, or every keystroke near an edge would commit; the
+        // exact offset is taken afterwards, off a window slice that has caught up with the field.
+        val char = selection.min
+        val near = windowStart + content.encoding.encodedLength(window.text, 0, char)
+        if (chunks[windowFirst(chunkIndexAt(chunks, near))] == windowStart) return
+        commit()
+        open(windowStart + windowSlice.byteAt(char.coerceAtMost(windowSlice.text.length)))
     }
 
     /**
@@ -207,18 +213,27 @@ class DocumentState {
     }
 
     /**
-     * Writes the window back into the buffer without closing it: the field keeps its text, its
-     * selection and its focus, and only the offsets around it move. One arraycopy of whatever
-     * follows the window, and a re-chunk of the window itself.
+     * Writes what the window changed back into the document without closing it: the field keeps its
+     * text, its selection and its focus, and only the offsets around it move.
+     *
+     * What goes in is the run the typing actually touched and not the whole window — the window is
+     * a few thousand bytes and almost none of it was typed, and committing all of it would fill the
+     * typed buffer with text nobody typed and leave the file's own bytes for that run behind, which
+     * is exactly what byte pieces exist to avoid.
      */
-    private fun flush() {
-        if (windowStart < 0 || !windowEdited()) return
-        val was = windowEnd
-        val delta = window.text.length + windowBreak - (was - windowStart)
-        buffer.replace(windowStart, was - windowBreak, window.text.toString())
-        windowEnd = was + delta
-        if (visibleFrom >= was) visibleFrom += delta
-        chunks = if (whole) intArrayOf(0) else respan(chunks, windowStart, was, buffer, delta)
+    private fun commit() {
+        if (windowStart < 0) return
+        val now = window.text
+        val change = change(windowSlice.text, now) ?: return
+        val from = windowStart + windowSlice.byteAt(change.from)
+        val to = windowStart + windowSlice.byteAt(change.was)
+        val typed = content.encoding.encode(now, change.from, change.now)
+        val delta = content.replace(from, to, typed)
+
+        windowEnd += delta
+        if (visibleFrom >= to) visibleFrom += delta
+        windowSlice = windowSlice.replacing(change.from, change.was, now.subSequence(change.from, change.now), typed.size)
+        chunks = if (whole) intArrayOf(0) else respan(chunks, from, to, delta, content, content.encoding, content.length)
         version++
     }
 
@@ -231,25 +246,26 @@ class DocumentState {
      * against the top of the screen still has its full reach forward.
      */
     private fun open(offset: Int, selection: TextRange? = null) {
-        val at = offset.coerceIn(0, buffer.length)
+        val at = offset.coerceIn(0, content.length)
         val index = chunkIndexAt(chunks, at)
         val first = windowFirst(index)
         val last = (index + WINDOW_CHUNKS).coerceAtMost(chunks.size - 1)
         windowStart = chunks[first]
-        windowEnd = chunkEndAt(chunks, last, buffer.length)
-        val slice = buffer.substring(windowStart, windowEnd)
-        windowBreak = trailingBreak(slice)
-        val editable = slice.substring(0, slice.length - windowBreak)
+        windowEnd = chunkEndAt(chunks, last, content.length)
+        val full = content.slice(windowStart, windowEnd)
+        val slice = full.dropLast(trailingBreak(full.text))
+        windowBreak = full.bytes - slice.bytes
+        windowSlice = slice
         val local = if (selection == null) {
-            TextRange((at - windowStart).coerceIn(0, editable.length))
+            TextRange(slice.charAt(at - windowStart))
         } else {
             TextRange(
-                (selection.start - windowStart).coerceIn(0, editable.length),
-                (selection.end - windowStart).coerceIn(0, editable.length),
+                slice.charAt(selection.start - windowStart),
+                slice.charAt(selection.end - windowStart),
             )
         }
         window.edit {
-            replace(0, length, editable)
+            replace(0, length, slice.text)
             this.selection = local
         }
         focusWanted = true
@@ -257,23 +273,19 @@ class DocumentState {
 
     /** First chunk of a window holding the cursor's chunk [index], clamped as [open] describes. */
     private fun windowFirst(index: Int): Int {
-        val anchor = chunkIndexAt(chunks, visibleFrom.coerceIn(0, buffer.length))
+        val anchor = chunkIndexAt(chunks, visibleFrom.coerceIn(0, content.length))
         return (index - WINDOW_CHUNKS).coerceIn(minOf(anchor, index), index)
     }
 
     /** An offset past an open window has moved by whatever the window's own length has changed by. */
     private fun shifted(offset: Int): Int {
         if (windowStart < 0 || offset < windowEnd) return offset
-        return offset + (window.text.length + windowBreak) - (windowEnd - windowStart)
+        val text = window.text
+        val now = content.encoding.encodedLength(text, 0, text.length) + windowBreak
+        return offset + now - (windowEnd - windowStart)
     }
 
-    private fun windowEdited(): Boolean {
-        val field = window.text
-        val original = windowEnd - windowBreak - windowStart
-        if (field.length != original) return true
-        for (at in 0 until original) if (field[at] != buffer[windowStart + at]) return true
-        return false
-    }
+    override fun close() = content.close()
 }
 
 /** One row of the list: a read-only chunk, or the editable window standing in for several. */
@@ -298,7 +310,7 @@ private fun rowsOf(chunks: IntArray, length: Int, windowStart: Int, windowEnd: I
 @Composable
 fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
     val rows = remember(state.version, state.chunks, state.windowStart, state.windowEnd) {
-        rowsOf(state.chunks, state.text.length, state.windowStart, state.windowEnd)
+        rowsOf(state.chunks, state.content.length, state.windowStart, state.windowEnd)
     }
     val list = rememberLazyListState()
     LaunchedEffect(state.generation) { list.scrollToItem(0) }
@@ -320,7 +332,7 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
                 Modifier
                     .fillMaxWidth()
                     .height(TAIL)
-                    .pointerInput(state) { detectTapGestures { state.focus(state.text.length) } }
+                    .pointerInput(state) { detectTapGestures { state.focus(state.content.length) } }
             )
         }
     }
@@ -329,23 +341,32 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
 @Composable
 private fun ChunkRow(state: DocumentState, row: Row) {
     val slice = remember(state.version, row.start, row.end) {
-        val raw = state.text.substring(row.start, row.end)
-        raw.substring(0, raw.length - trailingBreak(raw))
+        val full = state.content.slice(row.start, row.end)
+        full.dropLast(trailingBreak(full.text))
     }
     val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
     BasicText(
-        text = slice,
+        text = slice.text,
         modifier = Modifier
             .fillMaxWidth()
-            .pointerInput(row.start) {
+            .pointerInput(slice) {
                 detectTapGestures(
                     onTap = { at ->
-                        layout.value?.let { state.focus(row.start + it.getOffsetForPosition(at)) }
+                        layout.value?.let {
+                            state.focus(row.start + slice.byteAt(it.getOffsetForPosition(at)))
+                        }
                     },
                     onLongPress = { at ->
                         layout.value?.let {
-                            val offset = row.start + it.getOffsetForPosition(at)
-                            state.focus(offset, wordAt(state.text, offset))
+                            val char = it.getOffsetForPosition(at)
+                            val word = wordAt(slice.text, char)
+                            state.focus(
+                                row.start + slice.byteAt(char),
+                                TextRange(
+                                    row.start + slice.byteAt(word.start),
+                                    row.start + slice.byteAt(word.end),
+                                ),
+                            )
                         }
                     },
                 )

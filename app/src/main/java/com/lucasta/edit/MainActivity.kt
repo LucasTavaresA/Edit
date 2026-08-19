@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +30,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -151,26 +153,42 @@ private fun Editor(opened: Uri? = null) {
     val document = remember { DocumentState() }
     var file by remember { mutableStateOf<Uri?>(null) }
     var name by remember { mutableStateOf(UNTITLED) }
-    var encoding by remember { mutableStateOf(Encoding.Utf8) }
-    var format by remember { mutableStateOf(Format.Plain) }
     var status by remember { mutableStateOf(NO_FILE) }
+    var asking by remember { mutableStateOf(false) }
+
+    // The document holds a descriptor open on the file it was opened on, for as long as it is the
+    // open document. Nothing else is holding it, so this is where it is let go.
+    DisposableEffect(document) { onDispose { document.close() } }
 
     suspend fun load(uri: Uri) {
         heap("before")
+        // Opening no longer reads the file, but it does index it for chunk boundaries, and that is
+        // a pass over the whole thing: seconds for a file of a gigabyte. Say so rather than look
+        // like nothing happened.
+        status = "opening ${displayName(context, uri)}"
         timed("open") {
             openDocument(context, uri)
                 .onSuccess {
-                    timed("setText") { document.load(it.text, whole = it.format == Format.Encrypted) }
+                    timed("setText") { document.load(it, whole = it.format == Format.Encrypted) }
                     frameAfterNext("layout")
                     heap("after")
-                    encoding = it.encoding
-                    format = it.format
                     file = uri
                     name = displayName(context, uri)
                     status = name
                 }
                 .onFailure { status = "could not open: ${it.message}" }
         }
+    }
+
+    suspend fun write(target: Uri) {
+        status = "saving ${displayName(context, target)}"
+        document.withContent { saveDocument(context, target, it) }
+            .onSuccess {
+                file = target
+                name = displayName(context, target)
+                status = "saved $name"
+            }
+            .onFailure { status = "could not save: ${it.message}" }
     }
 
     /**
@@ -180,12 +198,10 @@ private fun Editor(opened: Uri? = null) {
      */
     fun new() {
         scope.launch {
-            document.load(StringBuilder())
+            document.load(Content.empty())
             document.focus(0)
             file = null
             name = UNTITLED
-            encoding = Encoding.Utf8
-            format = Format.Plain
             status = NO_FILE
         }
     }
@@ -199,23 +215,23 @@ private fun Editor(opened: Uri? = null) {
 
     val saveAs = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { created ->
         created ?: return@rememberLauncherForActivityResult
-        scope.launch {
-            document.withText { saveDocument(context, created, TextDocument(it, encoding, format)) }
-                .onSuccess {
-                    file = created
-                    name = displayName(context, created)
-                    status = "saved $name"
-                }
-                .onFailure { status = "could not save: ${it.message}" }
-        }
+        scope.launch { write(created) }
     }
 
+    /**
+     * Saving asks first if the file is no longer the one that was opened. The document itself is
+     * fine either way — the descriptor kept it — so the only question is whose version the file
+     * ends up holding, and that is the user's to answer and not ours.
+     */
     fun save() {
         val target = file ?: return
         scope.launch {
-            document.withText { saveDocument(context, target, TextDocument(it, encoding, format)) }
-                .onSuccess { status = "saved $name" }
-                .onFailure { status = "could not save: ${it.message}" }
+            when (collision(context, target, document.content)) {
+                Collision.None -> write(target)
+                Collision.Replaced -> asking = true
+                Collision.Rewritten ->
+                    status = "$name was rewritten while it was open, so this document is no longer all of it"
+            }
         }
     }
 
@@ -233,6 +249,35 @@ private fun Editor(opened: Uri? = null) {
         DocumentEditor(
             state = document,
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
+        )
+    }
+
+    if (asking) {
+        AlertDialog(
+            onDismissRequest = { asking = false },
+            title = { Text("$name changed") },
+            text = {
+                Text(
+                    "Something else replaced it since it was opened. This document is still what " +
+                        "the file held then, with your edits in it. Saving puts that over whatever " +
+                        "is there now."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    asking = false
+                    file?.let { target -> scope.launch { write(target) } }
+                }) { Text("Overwrite") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        asking = false
+                        saveAs.launch(name)
+                    }) { Text("Save as") }
+                    TextButton(onClick = { asking = false }) { Text("Cancel") }
+                }
+            },
         )
     }
 }

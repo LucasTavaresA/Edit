@@ -1,10 +1,17 @@
 package com.lucasta.edit
 
 /**
- * Layout chunks. The document stays one flat run of characters; what changes is that only the part
- * of it that is on screen is ever handed to the text layout, a couple of KB at a time. Laying out
- * text costs about 5 seconds per MB and nothing makes that per-character cost smaller, so the only
- * way to open a large file quickly is to lay out almost none of it.
+ * Somewhere to read the document's bytes from, so that indexing one neither knows nor cares whether
+ * they are in the file or in the buffer holding what was typed.
+ */
+fun interface Bytes {
+    fun read(from: Int, to: Int): ByteArray
+}
+
+/**
+ * Layout chunks. Only the part of the document on screen is ever handed to a text layout, a couple
+ * of KB at a time. Laying out text costs about 5 seconds per MB and nothing makes that per-character
+ * cost smaller, so the only way to open a large file quickly is to lay out almost none of it.
  *
  * A chunk covers whole lines wherever it can, so its boundaries fall where a line break already is
  * and wrapping inside a chunk is exactly what wrapping the whole document would have produced. A
@@ -12,99 +19,179 @@ package com.lucasta.edit
  * limit — the one case where a chunk boundary is visible, as a wrap that a whole-document layout
  * would have put a few characters later.
  *
- * Everything here takes a `CharSequence` and returns an `IntArray`, so that indexing a document
- * neither copies it nor boxes a single offset.
+ * Everything here counts bytes, because that is what the document is addressed in. Both targets are
+ * scaled by the size of a code unit, so a chunk holds about as much text whatever the encoding, and
+ * a line break is looked for as a code unit rather than as a byte: in UTF-16 a byte 0x0A is only
+ * sometimes a line break, and the other times it is half of something else.
  */
 const val CHUNK_TARGET = 2048
 
 const val CHUNK_MAX = 4096
 
 /**
- * How much of the document is copied out at a time to be scanned. Has to exceed [CHUNK_MAX], so
- * that everything one chunk boundary depends on is inside one window.
+ * How much of the document is read at a time to be scanned. Has to exceed [CHUNK_MAX], so that
+ * everything one chunk boundary depends on is inside one window.
  */
 private const val SCAN = 1 shl 16
 
+private const val LINE_FEED = 0x0A
+
+private const val SPACE = 0x20
+
 /**
- * Offsets of the chunk starts, always beginning with 0. Empty text is one empty chunk.
- *
- * The scan runs over Strings copied out of the document a window at a time, rather than over the
- * document itself, because `String.indexOf` is an intrinsic and `CharSequence.get` is an interface
- * call that never gets hot enough to be compiled: the scanning loop here is entered a few thousand
- * times but only runs a couple of thousand iterations each time, which is under the threshold for
- * both the method and the loop. Reading the characters through the interface measured 500 ms on a
- * 16 MB file and did not get faster on a second run in the same process. Copying 64 KB at a time
- * and letting the intrinsic do the looking costs about 7% extra copying and is worth it several
- * times over.
+ * Byte offsets of the chunk starts covering [from] to [to], always beginning with [from]. An empty
+ * range is one empty chunk.
  */
-fun chunkStarts(text: CharSequence): IntArray {
-    val length = text.length
-    if (length == 0) return intArrayOf(0)
-    var starts = IntArray(length / CHUNK_TARGET + 2)
+fun chunkStarts(source: Bytes, from: Int, to: Int, encoding: Encoding): IntArray {
+    if (to <= from) return intArrayOf(from)
+    val target = CHUNK_TARGET * encoding.unitBytes
+    val max = CHUNK_MAX * encoding.unitBytes
+    var starts = IntArray((to - from) / target + 2)
     var count = 0
-    var window = ""
-    var base = 0
-    var at = 0
+    var window = ByteArray(0)
+    var base = from
+    var at = from
     do {
         if (count == starts.size) starts = starts.copyOf(starts.size * 2)
         starts[count++] = at
-        if (at < base || (at + CHUNK_MAX > base + window.length && base + window.length < length)) {
+        if (at < base || (at + max > base + window.size && base + window.size < to)) {
             base = at
-            window = text.substring(base, minOf(base + SCAN, length))
+            window = source.read(base, minOf(base + SCAN, to))
         }
-        at = chunkEnd(window, at - base, base, length)
-    } while (at < length)
+        at = chunkEnd(window, base, at, to, target, max, encoding)
+    } while (at < to)
     return starts.copyOf(count)
 }
 
 /**
- * Where the chunk starting at [start] of [window] ends, as an offset into the whole document.
- * [base] is where the window sits in the document and [length] is the document's own length.
+ * Where the chunk starting at [at] ends. [window] is the stretch of the document that begins at
+ * [base], and [to] is where the document itself ends. Offsets in and out are the document's.
  */
-private fun chunkEnd(window: String, start: Int, base: Int, length: Int): Int {
-    val limit = minOf(window.length, start + CHUNK_MAX)
-    var end = start
-    while (end - start < CHUNK_TARGET) {
-        val br = window.indexOf('\n', end)
-        if (br < 0 || br >= limit) break
-        end = br + 1
+private fun chunkEnd(
+    window: ByteArray,
+    base: Int,
+    at: Int,
+    to: Int,
+    target: Int,
+    max: Int,
+    encoding: Encoding,
+): Int {
+    val limit = minOf(base + window.size, at + max)
+    var end = at
+    while (end - at < target) {
+        val line = unitAfter(window, end - base, limit - base, encoding, LINE_FEED)
+        if (line < 0) break
+        end = base + line
     }
-    if (end > start) return base + end
+    if (end > at) return end
 
     // One line longer than a chunk, or the tail of a file that ends without a break. Cut it, on a
-    // space if there is one to cut on, and never between the halves of a surrogate pair.
-    if (limit == window.length && base + limit == length) return length
-    val space = window.lastIndexOf(' ', limit - 1)
-    if (space >= start + CHUNK_TARGET) return base + space + 1
-    var cut = limit
-    if (base + cut < length && window[cut].isLowSurrogate() && window[cut - 1].isHighSurrogate()) cut--
-    return base + cut
+    // space if there is one to cut on, and never in the middle of a character.
+    if (limit == to) return to
+    val space = unitBefore(window, at - base, limit - base, encoding, SPACE)
+    if (space >= 0 && base + space >= at + target) return base + space
+    return base + boundaryAt(window, limit - base, at - base, encoding)
+}
+
+/** Where the first code unit equal to [value] between [from] and [to] ends, or -1. */
+private fun unitAfter(window: ByteArray, from: Int, to: Int, encoding: Encoding, value: Int): Int {
+    var at = from
+    if (encoding.unitBytes == 1) {
+        val byte = value.toByte()
+        while (at < to) {
+            if (window[at] == byte) return at + 1
+            at++
+        }
+        return -1
+    }
+    val first = (if (encoding == Encoding.Utf16Le) value and 0xFF else value shr 8).toByte()
+    val second = (if (encoding == Encoding.Utf16Le) value shr 8 else value and 0xFF).toByte()
+    while (at + 2 <= to) {
+        if (window[at] == first && window[at + 1] == second) return at + 2
+        at += 2
+    }
+    return -1
+}
+
+/** Where the last code unit equal to [value] between [from] and [to] ends, or -1. */
+private fun unitBefore(window: ByteArray, from: Int, to: Int, encoding: Encoding, value: Int): Int {
+    val step = encoding.unitBytes
+    var at = to - step
+    val first = (if (step == 1 || encoding == Encoding.Utf16Le) value and 0xFF else value shr 8).toByte()
+    val second = (if (encoding == Encoding.Utf16Le) value shr 8 else value and 0xFF).toByte()
+    while (at >= from) {
+        if (window[at] == first && (step == 1 || window[at + 1] == second)) return at + step
+        at -= step
+    }
+    return -1
 }
 
 /**
- * The chunk index after the span between [start] and [end] of the old text was replaced, changing
- * its length by [delta]. Only the replaced span is chunked again: the chunks before it are
- * untouched and the ones after it have merely moved, so committing an edit costs the size of the
- * span and not the size of the document.
+ * The last place at or before [at] where a character begins, never earlier than [floor]. A cut
+ * anywhere else would split a character in half and leave both halves undecodable, which is the one
+ * thing chunking is not allowed to invent.
  */
-fun respan(chunks: IntArray, start: Int, end: Int, text: CharSequence, delta: Int): IntArray {
-    val middle = chunkStarts(text.subSequence(start, end + delta))
+private fun boundaryAt(window: ByteArray, at: Int, floor: Int, encoding: Encoding): Int {
+    if (encoding.unitBytes == 2) {
+        var cut = at - (at % 2)
+        // The high half of a surrogate pair is a unit in 0xD800..0xDBFF, whichever way round the
+        // two bytes of it are stored.
+        if (cut - 2 >= floor) {
+            val high = if (encoding == Encoding.Utf16Le) window[cut - 1] else window[cut - 2]
+            if ((high.toInt() and 0xFC) == 0xD8) cut -= 2
+        }
+        return maxOf(cut, floor)
+    }
+    // A UTF-8 continuation byte is 0b10xxxxxx, and no character is more than four bytes long, so
+    // three of them is as far back as a boundary can be.
+    var cut = at
+    var back = 0
+    while (cut > floor && back < 3 && cut < window.size && (window[cut].toInt() and 0xC0) == 0x80) {
+        cut--
+        back++
+    }
+    return cut
+}
+
+/**
+ * The chunk index after the bytes between [start] and [end] were replaced, changing the document's
+ * length by [delta]. Only the chunks the change fell inside are indexed again: the ones before it
+ * are untouched and the ones after it have merely moved, so committing an edit costs the size of
+ * what was edited and not the size of the document.
+ *
+ * The span is widened to whole chunks first. What the window commits is the run of bytes it
+ * actually changed, which starts and ends wherever the typing did, and re-indexing from there would
+ * put a chunk boundary in the middle of a line.
+ */
+fun respan(
+    chunks: IntArray,
+    start: Int,
+    end: Int,
+    delta: Int,
+    source: Bytes,
+    encoding: Encoding,
+    length: Int,
+): IntArray {
+    val was = length - delta
+    val from = chunks[chunkIndexAt(chunks, start)]
+    val to = chunkEndAt(chunks, chunkIndexAt(chunks, maxOf(end, start).coerceAtMost(was)), was)
+    val middle = chunkStarts(source, from, to + delta, encoding)
     val out = IntArray(chunks.size + middle.size + 1)
     var count = 0
     for (offset in chunks) {
-        if (offset >= start) break
+        if (offset >= from) break
         out[count++] = offset
     }
-    for (offset in middle) count = push(out, count, start + offset, text.length)
+    for (offset in middle) count = push(out, count, offset, length)
     for (offset in chunks) {
-        if (offset >= end) count = push(out, count, offset + delta, text.length)
+        if (offset >= to) count = push(out, count, offset + delta, length)
     }
     if (count == 0) out[count++] = 0
     return out.copyOf(count)
 }
 
 /**
- * Chunk starts stay strictly increasing and stay inside the text, so that no chunk is empty: an
+ * Chunk starts stay strictly increasing and stay inside the document, so that no chunk is empty: an
  * empty chunk is a row of no height that cannot be tapped, and two rows claiming the same offset.
  */
 private fun push(out: IntArray, count: Int, offset: Int, length: Int): Int {
@@ -113,7 +200,7 @@ private fun push(out: IntArray, count: Int, offset: Int, length: Int): Int {
     return count + 1
 }
 
-/** The offset one past the last character of chunk [index]. */
+/** The offset one past the last byte of chunk [index]. */
 fun chunkEndAt(chunks: IntArray, index: Int, length: Int): Int =
     if (index + 1 < chunks.size) chunks[index + 1] else length
 
@@ -124,10 +211,10 @@ fun chunkIndexAt(chunks: IntArray, offset: Int): Int {
 }
 
 /**
- * Length of the line break that ends [slice], if any. A chunk keeps the break that ends it so the
- * document can be put back together from its chunks, but the break must not be drawn: the next
- * chunk is already on the next line, and a text layout ending in a break puts an empty line after
- * it.
+ * Length of the line break that ends [slice], in characters. A chunk keeps the break that ends it
+ * so the document can be put back together from its chunks, but the break must not be drawn: the
+ * next chunk is already on the next line, and a text layout ending in a break puts an empty line
+ * after it.
  */
 fun trailingBreak(slice: CharSequence): Int = when {
     slice.endsWith("\r\n") -> 2
