@@ -70,16 +70,26 @@ private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorSchem
     return if (dark) darkColorScheme() else lightColorScheme()
 }
 
+/** What a document that has never been saved is called, and what Save as offers for it. */
+private const val UNTITLED = "untitled.txt"
+
+/**
+ * A document with no file behind it, which is what the app starts with and what New goes back to.
+ * There is nowhere to write it, so Save does nothing at all until Save as has been through and said
+ * where it goes; [UNTITLED] is only the name that dialog is offered, not a file that exists.
+ */
+private const val NO_FILE = "no file"
+
 @Composable
 private fun Editor(opened: Uri? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val document = remember { DocumentState() }
     var file by remember { mutableStateOf<Uri?>(null) }
-    var name by remember { mutableStateOf("untitled.txt") }
+    var name by remember { mutableStateOf(UNTITLED) }
     var encoding by remember { mutableStateOf(Encoding.Utf8) }
     var format by remember { mutableStateOf(Format.Plain) }
-    var status by remember { mutableStateOf("no file") }
+    var status by remember { mutableStateOf(NO_FILE) }
 
     suspend fun load(uri: Uri) {
         heap("before")
@@ -96,6 +106,23 @@ private fun Editor(opened: Uri? = null) {
                     status = name
                 }
                 .onFailure { status = "could not open: ${it.message}" }
+        }
+    }
+
+    /**
+     * Back to an empty document with no file behind it. Nothing is created on disk: a new file is
+     * one that has never been saved, and where it goes is asked for by Save as when there is
+     * something to put in it.
+     */
+    fun new() {
+        scope.launch {
+            document.load(StringBuilder())
+            document.focus(0)
+            file = null
+            name = UNTITLED
+            encoding = Encoding.Utf8
+            format = Format.Plain
+            status = NO_FILE
         }
     }
 
@@ -130,6 +157,7 @@ private fun Editor(opened: Uri? = null) {
 
     Column(Modifier.fillMaxSize().safeDrawingPadding()) {
         Row(Modifier.fillMaxWidth()) {
+            TextButton(onClick = { new() }) { Text("New") }
             TextButton(onClick = { open.launch(arrayOf("*/*")) }) { Text("Open") }
             TextButton(onClick = { save() }, enabled = file != null) { Text("Save") }
             TextButton(onClick = { saveAs.launch(name) }) { Text("Save as") }

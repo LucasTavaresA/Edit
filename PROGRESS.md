@@ -48,7 +48,7 @@ Everything below is plain `pkg install` or a stock SDK — no hand-assembled pie
 
 1. **Only files that survive a byte-exact round trip will open at all.** A file with a few corrupt bytes is refused outright, even though it might be worth reading. There is a TODO in `TextFile.kt` for offering to open it anyway as a deliberate choice, with a clear warning that saving will rewrite the bytes that could not be represented and that a backup must exist first.
 2. Legacy single-byte encodings are rejected. Latin-1 and Windows-1252 accept any byte sequence, so they cannot be detected, only guessed at. A file of Latin-1 accented text will simply refuse to open.
-3. No unsaved-changes tracking, so opening a second file silently throws away edits to the first.
+3. No unsaved-changes tracking, so opening a second file, or starting a new one, silently throws away edits to the first.
 4. The whole file is read into one String. See "File size".
 5. No persistable URI permission is taken, so a file cannot be reopened after the process dies. Harmless until there is a recent-files list to reopen from.
 6. **Save fails outright when the app was handed read-only access.** An `ACTION_VIEW` intent that grants read but not write gives `could not save: <package> has no access to <uri>`, which is accurate and useless — there is nothing the user can do with it. It should fall back to offering Save as, since that is the actual way out. Found while testing, by granting only read: `--grant-read-uri-permission` without `--grant-write-uri-permission`.

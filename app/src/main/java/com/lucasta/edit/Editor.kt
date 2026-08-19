@@ -284,9 +284,12 @@ private fun rowsOf(chunks: IntArray, length: Int, windowStart: Int, windowEnd: I
     for (index in chunks.indices) {
         val start = chunks[index]
         when {
+            // Tested before the read-only case, and not after it, because an empty document is a
+            // window of no length: it starts where it ends, and asking first whether the chunk is
+            // outside the window would put it outside its own.
+            windowStart >= 0 && start == windowStart -> rows.add(Row(windowStart, windowEnd, true))
             windowStart < 0 || start < windowStart || start >= windowEnd ->
                 rows.add(Row(start, chunkEndAt(chunks, index, length), false))
-            start == windowStart -> rows.add(Row(windowStart, windowEnd, true))
         }
     }
     return rows
