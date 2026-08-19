@@ -50,7 +50,11 @@ class MainActivity : ComponentActivity() {
             else -> null
         }
         setContent {
-            MaterialTheme(colorScheme = systemColorScheme()) {
+            // The bar icons are set once, against the mode in force at the time, and the activity
+            // is no longer rebuilt when that mode changes — so they are set again when it does.
+            val dark = isSystemInDarkTheme()
+            LaunchedEffect(dark) { enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars) }
+            MaterialTheme(colorScheme = systemColorScheme(dark)) {
                 Surface(Modifier.fillMaxSize()) { Editor(opened) }
             }
         }

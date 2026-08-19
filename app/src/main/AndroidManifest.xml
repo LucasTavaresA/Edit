@@ -6,8 +6,18 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.Edit">
+        <!--
+            Every configuration change we can take ourselves is taken here, because the alternative
+            is the activity being rebuilt: the open document lives in the composition and there is
+            nothing to restore it from — the buffer is far too big for a saved instance state and no
+            permission is held that would let the file be read a second time. Rotating is the one
+            that happens by accident, but a scheduled switch into dark mode would be worse, since it
+            would arrive in the middle of editing. Nothing here is read outside composition, so
+            Compose sees the new configuration and lays out again on its own.
+        -->
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
