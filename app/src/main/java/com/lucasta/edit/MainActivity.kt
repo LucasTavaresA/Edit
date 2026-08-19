@@ -1,5 +1,6 @@
 package com.lucasta.edit
 
+import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
@@ -17,12 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.input.rememberTextFieldState
-import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.LocalContentColor
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -32,13 +28,13 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -49,15 +45,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val bars = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
+        val opened = when (intent?.action) {
+            Intent.ACTION_VIEW, Intent.ACTION_EDIT -> intent.data
+            else -> null
+        }
         setContent {
             MaterialTheme(colorScheme = systemColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { Editor() }
+                Surface(Modifier.fillMaxSize()) { Editor(opened) }
             }
         }
     }
 }
 
-/** The system light or dark scheme, taking the wallpaper palette where the platform offers one. */
 @Composable
 private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorScheme {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -68,34 +67,45 @@ private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorSchem
 }
 
 @Composable
-private fun Editor() {
+private fun Editor(opened: Uri? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val text = rememberTextFieldState()
+    val document = remember { DocumentState() }
     var file by remember { mutableStateOf<Uri?>(null) }
     var name by remember { mutableStateOf("untitled.txt") }
     var encoding by remember { mutableStateOf(Encoding.Utf8) }
+    var format by remember { mutableStateOf(Format.Plain) }
     var status by remember { mutableStateOf("no file") }
 
-    val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
-        picked ?: return@rememberLauncherForActivityResult
-        scope.launch {
-            readDocument(context, picked)
+    suspend fun load(uri: Uri) {
+        heap("before")
+        timed("open") {
+            openDocument(context, uri)
                 .onSuccess {
-                    text.setTextAndPlaceCursorAtEnd(it.text)
+                    timed("setText") { document.load(it.text, whole = it.format == Format.Encrypted) }
+                    frameAfterNext("layout")
+                    heap("after")
                     encoding = it.encoding
-                    file = picked
-                    name = displayName(context, picked)
+                    format = it.format
+                    file = uri
+                    name = displayName(context, uri)
                     status = name
                 }
                 .onFailure { status = "could not open: ${it.message}" }
         }
     }
 
+    LaunchedEffect(opened) { opened?.let { load(it) } }
+
+    val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
+        picked ?: return@rememberLauncherForActivityResult
+        scope.launch { load(picked) }
+    }
+
     val saveAs = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { created ->
         created ?: return@rememberLauncherForActivityResult
         scope.launch {
-            writeDocument(context, created, TextDocument(text.text.toString(), encoding))
+            document.withText { saveDocument(context, created, TextDocument(it, encoding, format)) }
                 .onSuccess {
                     file = created
                     name = displayName(context, created)
@@ -108,7 +118,7 @@ private fun Editor() {
     fun save() {
         val target = file ?: return
         scope.launch {
-            writeDocument(context, target, TextDocument(text.text.toString(), encoding))
+            document.withText { saveDocument(context, target, TextDocument(it, encoding, format)) }
                 .onSuccess { status = "saved $name" }
                 .onFailure { status = "could not save: ${it.message}" }
         }
@@ -121,11 +131,9 @@ private fun Editor() {
             TextButton(onClick = { saveAs.launch(name) }) { Text("Save as") }
         }
         Text(status, Modifier.padding(horizontal = 12.dp))
-        BasicTextField(
-            state = text,
-            modifier = Modifier.fillMaxWidth().weight(1f).padding(12.dp),
-            textStyle = LocalTextStyle.current.copy(color = LocalContentColor.current),
-            cursorBrush = SolidColor(LocalContentColor.current),
+        DocumentEditor(
+            state = document,
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
         )
     }
 }
