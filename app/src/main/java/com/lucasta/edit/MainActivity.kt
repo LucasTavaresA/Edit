@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -36,6 +37,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import android.graphics.Color as ArgbColor
@@ -70,7 +72,9 @@ private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorSchem
     } else {
         if (dark) darkColorScheme() else lightColorScheme()
     }
-    return if (dark) scheme.unlit() else scheme
+    // The rule under the toolbar draws itself with outlineVariant, and Material's is a grey faint
+    // enough to be lost against either ground. It wants the plain opposite of what it sits on.
+    return if (dark) scheme.unlit() else scheme.copy(outlineVariant = Color.Black)
 }
 
 /**
@@ -79,6 +83,7 @@ private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorSchem
  * Material would otherwise use light the whole screen up. Only the grounds move — what is drawn on
  * them keeps the colours the scheme chose, so contrast goes up rather than down. [surfaceTint] goes
  * black as well, since that is the colour elevation would use to lift a surface back off the black.
+ * [outlineVariant] is the one foreground that moves, for the reason given where it is set light.
  */
 private fun ColorScheme.unlit(): ColorScheme = copy(
     background = Color.Black,
@@ -92,6 +97,7 @@ private fun ColorScheme.unlit(): ColorScheme = copy(
     surfaceContainerLow = Color.Black,
     surfaceContainerHigh = Color.Black,
     surfaceContainerHighest = Color.Black,
+    outlineVariant = Color.White,
 )
 
 /** What a document that has never been saved is called, and what Save as offers for it. */
@@ -187,6 +193,9 @@ private fun Editor(opened: Uri? = null) {
             TextButton(onClick = { saveAs.launch(name) }) { Text("Save as") }
         }
         Text(status, Modifier.padding(horizontal = 12.dp))
+        // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at that
+        // width the rule reads as a bar across the screen rather than as a line under the toolbar.
+        HorizontalDivider(thickness = with(LocalDensity.current) { 1.toDp() })
         DocumentEditor(
             state = document,
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
