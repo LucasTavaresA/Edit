@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.HorizontalDivider
@@ -236,11 +238,24 @@ private fun Editor(opened: Uri? = null) {
     }
 
     Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-        Row(Modifier.fillMaxWidth()) {
+        // Scrollable, because seven text buttons is a little wider than a phone in portrait and
+        // a toolbar that clips its last button is worse than one that can be pushed along.
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
             TextButton(onClick = { new() }) { Text("New") }
             TextButton(onClick = { open.launch(arrayOf("*/*")) }) { Text("Open") }
             TextButton(onClick = { save() }, enabled = file != null) { Text("Save") }
             TextButton(onClick = { saveAs.launch(name) }) { Text("Save as") }
+            // Select all works on the document and not on the window, which is the only way it
+            // could work: the field holds a few kilobytes of whatever is open.
+            TextButton(onClick = { scope.launch { document.selectAll() } }) { Text("All") }
+            TextButton(
+                onClick = { scope.launch { document.undo() } },
+                enabled = document.canUndo,
+            ) { Text("Undo") }
+            TextButton(
+                onClick = { scope.launch { document.redo() } },
+                enabled = document.canRedo,
+            ) { Text("Redo") }
         }
         Text(status, Modifier.padding(horizontal = 12.dp))
         // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at that

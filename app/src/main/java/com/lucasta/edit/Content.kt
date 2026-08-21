@@ -13,6 +13,13 @@ import java.io.OutputStream
 /** Bytes moved per pass whenever the whole document has to go somewhere. */
 internal const val PASS = 64 * 1024
 
+/**
+ * How large the buffer holding what was typed has to get before it is worth looking for parts of it
+ * nothing names any more. Typing never reaches this; pasting and deleting over and over is what
+ * does, and that is the case it exists for.
+ */
+private const val COMPACT_BYTES = 1 shl 20
+
 /** What a file was, closely enough to tell whether it is still the same one. */
 data class Stamp(val device: Long, val inode: Long, val size: Long, val modified: Long) {
     constructor(stat: StructStat) : this(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime)
@@ -135,6 +142,8 @@ class Content private constructor(
 
     private val pieces = Pieces()
 
+    private var compactAt = COMPACT_BYTES
+
     /** The file this document was last in step with, or null if it has never been in step with one. */
     var stamp: Stamp? = file?.stamp
         private set
@@ -188,7 +197,33 @@ class Content private constructor(
      * document got. Nothing is copied but the pieces themselves: [bytes] goes on the end of the
      * typed buffer and the sequence is rewritten around it.
      */
-    fun replace(from: Int, to: Int, bytes: ByteArray): Int = pieces.replace(from, to, append(bytes))
+    fun replace(from: Int, to: Int, bytes: ByteArray): Int {
+        val delta = pieces.replace(from, to, listOfNotNull(append(bytes)))
+        settle()
+        return delta
+    }
+
+    val canUndo: Boolean get() = pieces.canUndo
+
+    val canRedo: Boolean get() = pieces.canRedo
+
+    /** Walks the last change back, and says what it covered, or null when there is none left. */
+    fun undo(): Span? = pieces.undo()
+
+    fun redo(): Span? = pieces.redo()
+
+    /**
+     * Lets go of whatever the typed buffer is holding that no piece names any more, which is what a
+     * session of pasting and deleting leaves behind. Only ever looked for once the buffer is large
+     * enough for it to matter, and the next look is put off until it has doubled again, so a buffer
+     * that is all still in use is not copied over and over to learn that.
+     */
+    private fun settle() {
+        if (typedLength < compactAt) return
+        typed = pieces.compact(typed)
+        typedLength = typed.size
+        compactAt = maxOf(COMPACT_BYTES, minOf(typedLength, Int.MAX_VALUE / 2) * 2)
+    }
 
     private fun append(bytes: ByteArray): Piece? {
         if (bytes.isEmpty()) return null
@@ -233,6 +268,7 @@ class Content private constructor(
         pieces.reset(Piece(encoding.bom.size, length, typed = false))
         typed = ByteArray(0)
         typedLength = 0
+        compactAt = COMPACT_BYTES
     }
 
     override fun close() {

@@ -173,21 +173,22 @@ fun respan(
     length: Int,
 ): IntArray {
     val was = length - delta
-    val from = chunks[chunkIndexAt(chunks, start)]
-    val to = chunkEndAt(chunks, chunkIndexAt(chunks, maxOf(end, start).coerceAtMost(was)), was)
+    val head = chunkIndexAt(chunks, start)
+    val from = chunks[head]
+    val tail = chunkIndexAt(chunks, maxOf(end, start).coerceAtMost(was))
+    val to = chunkEndAt(chunks, tail, was)
     val middle = chunkStarts(source, from, to + delta, encoding)
-    val out = IntArray(chunks.size + middle.size + 1)
+    // Sized to the answer rather than to the index, because this runs on every commit and on a
+    // document of any size the index is the largest thing around: a spare copy of it per keystroke
+    // is megabytes of garbage for nothing.
+    val after = if (to >= was) chunks.size else tail + 1
+    val out = IntArray(head + middle.size + (chunks.size - after))
     var count = 0
-    for (offset in chunks) {
-        if (offset >= from) break
-        out[count++] = offset
-    }
+    for (index in 0 until head) out[count++] = chunks[index]
     for (offset in middle) count = push(out, count, offset, length)
-    for (offset in chunks) {
-        if (offset >= to) count = push(out, count, offset + delta, length)
-    }
-    if (count == 0) out[count++] = 0
-    return out.copyOf(count)
+    for (index in after until chunks.size) count = push(out, count, chunks[index] + delta, length)
+    if (count == 0) return intArrayOf(0)
+    return if (count == out.size) out else out.copyOf(count)
 }
 
 /**
