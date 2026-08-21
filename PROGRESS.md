@@ -140,7 +140,7 @@ What is left is:
 
 **None of this is per-device any more.** The old cap was a number chosen against one device's 256 MB heap and was wrong on other hardware in both directions. Nothing here depends on the heap the device hands out.
 
-`edit-test-{064,128,256}kb.txt`, `edit-test-{001,004,016,032,064,128}mb.txt` and `edit-test-1gb.txt` are the files to check it with, plus `edit-test-fake-{small,big}.age`, which are not encrypted at all — they just start with age's magic, which is all `looksEncrypted` looks at — and `edit-test-{utf8,utf16le,malformed,latin1}.txt` for the decoder. New files in shared storage are invisible to the app until MediaStore knows about them: `adb shell content call --uri content://media/external --method scan_file --arg /sdcard/Download/<name>`.
+`edit-test-{064,128,256}kb.txt`, `edit-test-{001,004,016,032,064,128}mb.txt` and `edit-test-1gb.txt` are the files to check it with, plus `edit-test-fake-{small,big}.age`, which are not encrypted at all — they just start with age's magic, which is all `looksEncrypted` looks at — and `edit-test-{utf8,utf16le,malformed,latin1}.txt` for the decoder. `edit-test-window.txt` (1,000 numbered lines of 51 bytes) and `edit-test-save.txt` (300 of the same) are what the window was driven with: every line says where it is, so a screenshot says where the window is and a common-prefix comparison says exactly which lines an edit took out. Regenerate them rather than reusing one that has been edited. New files in shared storage are invisible to the app until MediaStore knows about them: `adb shell content call --uri content://media/external --method scan_file --arg /sdcard/Download/<name>`.
 
 ## Verified on the phone
 
