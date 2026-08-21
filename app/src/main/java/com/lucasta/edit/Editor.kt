@@ -32,6 +32,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -602,24 +603,26 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
     LaunchedEffect(state) {
         snapshotFlow { state.window.text to state.window.selection }.collect { state.follow() }
     }
+    // The ground under the rows, which is the rest of the screen whenever the document is shorter
+    // than one — a document just opened, or a new one, where it is nearly all of it. A row and the
+    // field each consume their own taps and the list consumes a drag, so what is left to arrive
+    // here is a tap that landed on nothing, and the end of the document is what lies under it.
+    val onGround = Modifier.pointerInput(state) {
+        detectTapGestures { scope.launch { state.focus(state.content.length) } }
+    }
     // Every row is keyed on where it starts, the window included, so a key always means the same
     // place in the document. Keying the window on itself instead would let the list follow it
     // across the file: with the window at the top of the screen, tapping anything below would take
     // the anchor along and land the tap wherever the window went.
-    LazyColumn(modifier, state = list) {
+    LazyColumn(modifier.then(onGround), state = list) {
         items(rows.count, key = { rows.start(it) }) { index ->
             if (rows.editable(index)) WindowRow(state)
             else ChunkRow(state, rows.start(index), rows.end(index), scope)
         }
+        // Room to scroll the last line clear of the bottom edge. It takes no taps of its own: it is
+        // ground like the rest, and the list behind it is what answers for all of it.
         item(key = "tail") {
-            Spacer(
-                Modifier
-                    .fillMaxWidth()
-                    .height(TAIL)
-                    .pointerInput(state) {
-                        detectTapGestures { scope.launch { state.focus(state.content.length) } }
-                    }
-            )
+            Spacer(Modifier.fillMaxWidth().height(TAIL))
         }
     }
 }
@@ -679,10 +682,16 @@ private fun ChunkRow(state: DocumentState, start: Int, end: Int, scope: Coroutin
 @Composable
 private fun WindowRow(state: DocumentState) {
     val focus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(state.opened) {
         if (state.consumeFocus()) {
             withFrameNanos { }
             runCatching { focus.requestFocus() }
+            // Asking for focus raises the keyboard only where the field did not already have it,
+            // which is most of the time: the window is keyed on where it starts, so moving it
+            // composes a new field. A document of one empty line is the case where it does not
+            // move at all, and there a tap would put the cursor back with no keyboard under it.
+            keyboard?.show()
         }
     }
     BasicTextField(
