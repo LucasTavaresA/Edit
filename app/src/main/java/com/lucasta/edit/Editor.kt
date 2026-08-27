@@ -30,6 +30,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -171,7 +172,16 @@ class DocumentState : Closeable {
 
     var visibleTo = 0
 
-    private var focusWanted = false
+    /**
+     * Which window the field is to take focus for, or -1 when nobody is waiting for it.
+     *
+     * Addressed to a window rather than kept as a bare flag, because cutting the window again
+     * leaves two rows alive at once: the one being replaced re-runs its effects before the new one
+     * has composed, so a flag would be taken by the row that is about to be disposed and go with
+     * it — leaving the field that survives unfocused, which ends Compose's input session and shuts
+     * the keyboard. The row that may have it is the one drawing the window it was set for.
+     */
+    private var focusFor = -1
 
     /** Set while the document is being written out, when it must not be changed. */
     private var writing = false
@@ -208,6 +218,7 @@ class DocumentState : Closeable {
         this.whole = whole
         windowStart = -1
         windowEnd = -1
+        focusFor = -1
         windowBreak = 0
         windowSlice = Slice("", 0, value.encoding, intArrayOf(0, 0))
         marked = null
@@ -333,13 +344,20 @@ class DocumentState : Closeable {
     }
 
     /**
-     * True once per cutting of the window, so the field takes focus when it appears but not every
-     * time scrolling brings it back.
+     * Whether the row drawing [start] is the one being asked to take focus: true once per cutting
+     * of the window, so the field takes focus when it appears but not every time scrolling brings
+     * it back. A row left over from the window's last position does not match, and so cannot take
+     * the answer away with it.
+     *
+     * Only asks. What answers is [focusTaken], once the field really holds focus — because the row
+     * that asks may be disposed, or its effect cancelled by the next cut, before it ever gets
+     * there, and a flag cleared on the way out would be a keyboard nobody reopens.
      */
-    fun consumeFocus(): Boolean {
-        val wanted = focusWanted
-        focusWanted = false
-        return wanted
+    fun wantsFocus(start: Int) = focusFor >= 0 && focusFor == start
+
+    /** The field is focused, so nothing is waiting for it any more. */
+    fun focusTaken(start: Int) {
+        if (focusFor == start) focusFor = -1
     }
 
     /**
@@ -433,7 +451,7 @@ class DocumentState : Closeable {
         // The field keeps its own history of what it held, which after a cut is somebody else's
         // text at somebody else's offsets. The document's own history is what undo walks.
         window.undoState.clearHistory()
-        focusWanted = true
+        focusFor = windowStart
         opened++
     }
 
@@ -616,7 +634,7 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
     // the anchor along and land the tap wherever the window went.
     LazyColumn(modifier.then(onGround), state = list) {
         items(rows.count, key = { rows.start(it) }) { index ->
-            if (rows.editable(index)) WindowRow(state)
+            if (rows.editable(index)) WindowRow(state, rows.start(index))
             else ChunkRow(state, rows.start(index), rows.end(index), scope)
         }
         // Room to scroll the last line clear of the bottom edge. It takes no taps of its own: it is
@@ -680,11 +698,11 @@ private fun ChunkRow(state: DocumentState, start: Int, end: Int, scope: Coroutin
 }
 
 @Composable
-private fun WindowRow(state: DocumentState) {
+private fun WindowRow(state: DocumentState, start: Int) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(state.opened) {
-        if (state.consumeFocus()) {
+    LaunchedEffect(state.opened, start) {
+        if (state.wantsFocus(start)) {
             withFrameNanos { }
             runCatching { focus.requestFocus() }
             // Asking for focus raises the keyboard only where the field did not already have it,
@@ -696,7 +714,10 @@ private fun WindowRow(state: DocumentState) {
     }
     BasicTextField(
         state = state.window,
-        modifier = Modifier.fillMaxWidth().focusRequester(focus),
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focus)
+            .onFocusChanged { if (it.isFocused) state.focusTaken(start) },
         textStyle = LocalTextStyle.current.copy(color = LocalContentColor.current),
         onTextLayout = { result -> result()?.let { state.laidOut(it) } },
         cursorBrush = SolidColor(LocalContentColor.current),
