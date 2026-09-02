@@ -292,7 +292,8 @@ class DocumentState : Closeable {
         chunks = if (whole) intArrayOf(0)
         else respan(chunks, span.at, span.at + span.was, delta, content, content.encoding, content.length)
         val seen = span.at in visibleFrom..visibleTo
-        if (visibleFrom >= span.at + span.was) visibleFrom += delta else if (visibleFrom > span.at) visibleFrom = span.at
+        if (visibleFrom > span.at && visibleFrom >= span.at + span.was) visibleFrom += delta
+        else if (visibleFrom > span.at) visibleFrom = span.at
         windowStart = -1
         reach(chunkIndexAt(chunks, span.at.coerceIn(0, content.length)))
         open(span.at + span.now)
@@ -415,7 +416,9 @@ class DocumentState : Closeable {
         val delta = content.replace(from, to, typed)
 
         windowEnd += delta
-        if (visibleFrom >= to) visibleFrom += delta
+        // Strictly past the edit, not merely at it: an insertion has [to] equal to its own start,
+        // and text inserted at the top row's start belongs to that row rather than above it.
+        if (visibleFrom > from && visibleFrom >= to) visibleFrom += delta
         windowSlice = windowSlice.replacing(change.from, change.was, now.subSequence(change.from, change.now), typed.size)
         chunks = if (whole) intArrayOf(0) else respan(chunks, from, to, delta, content, content.encoding, content.length)
         version++
