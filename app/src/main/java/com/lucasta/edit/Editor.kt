@@ -267,9 +267,13 @@ class DocumentState : Closeable {
      * a gigabyte as on a line.
      */
     suspend fun selectAll() {
-        if (writing || content.length == 0) return
+        if (writing) return
         marked = null
+        // Before the emptiness test, not after: a document typed from new holds everything it has
+        // in the field, and asking the document how long it is before that is written back answers
+        // for a document nobody has typed into.
         commit()
+        if (content.length == 0) return
         val at = visibleFrom.coerceIn(0, content.length)
         reach(chunkIndexAt(chunks, at))
         open(at)
