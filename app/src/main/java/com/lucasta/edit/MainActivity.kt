@@ -11,15 +11,18 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.HorizontalDivider
@@ -41,7 +44,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -238,24 +243,22 @@ private fun Editor(opened: Uri? = null) {
     }
 
     Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-        // Scrollable, because seven text buttons is a little wider than a phone in portrait and
-        // a toolbar that clips its last button is worse than one that can be pushed along.
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-            TextButton(onClick = { new() }) { Text("New") }
-            TextButton(onClick = { open.launch(arrayOf("*/*")) }) { Text("Open") }
-            TextButton(onClick = { save() }, enabled = file != null) { Text("Save") }
-            TextButton(onClick = { saveAs.launch(name) }) { Text("Save as") }
-            // Select all works on the document and not on the window, which is the only way it
-            // could work: the field holds a few kilobytes of whatever is open.
-            TextButton(onClick = { scope.launch { document.selectAll() } }) { Text("All") }
-            TextButton(
-                onClick = { scope.launch { document.undo() } },
-                enabled = document.canUndo,
-            ) { Text("Undo") }
-            TextButton(
-                onClick = { scope.launch { document.redo() } },
-                enabled = document.canRedo,
-            ) { Text("Redo") }
+        // The seven share the width between them and the row is exactly as tall as one of them is
+        // wide, so every button is a square and the row ends where the screen does. Measuring the
+        // width here rather than asking the configuration for it is what keeps that true in
+        // landscape and beside a cutout, where the padding above has already taken its share.
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            Row(Modifier.fillMaxWidth().height(maxWidth / TOOLS)) {
+                Tool("New") { new() }
+                Tool("Open") { open.launch(arrayOf("*/*")) }
+                Tool("Save", enabled = file != null) { save() }
+                Tool("Save as") { saveAs.launch(name) }
+                // Select all works on the document and not on the window, which is the only way it
+                // could work: the field holds a few kilobytes of whatever is open.
+                Tool("All") { scope.launch { document.selectAll() } }
+                Tool("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
+                Tool("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
+            }
         }
         Text(status, Modifier.padding(horizontal = 12.dp))
         // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at that
@@ -293,6 +296,45 @@ private fun Editor(opened: Uri? = null) {
                     TextButton(onClick = { asking = false }) { Text("Cancel") }
                 }
             },
+        )
+    }
+}
+
+/** How many buttons the toolbar has, which is also how the width is divided. */
+private const val TOOLS = 7
+
+/**
+ * One button on the toolbar: a square, and a seventh of the width.
+ *
+ * The row hands out its width by weight and fixes its own height to a seventh of that, so the
+ * shape falls out of the arithmetic rather than being asked for — nothing here is a number chosen
+ * against any one phone, and nothing is left over at the end of the row. Material's own sizing does
+ * not enter into it: a weight is a fixed constraint, so the 58dp minimum width that used to push
+ * the seventh button off the screen never applies.
+ *
+ * The shape is square rather than the pill Material gives a text button, since the pill is what
+ * the ripple is cut to and a round ripple inside a square target reads as a smaller target.
+ *
+ * The type is a step down from the `labelLarge` a button would otherwise take, and that is the
+ * widest label's doing: at full size "Save as" is wider than a square and wraps, which leaves one
+ * button two lines tall among six that are one. A step down puts every label on its own line. Two
+ * lines are still allowed rather than clipped, so a system font turned right up wraps and stays
+ * readable instead of losing its ends.
+ */
+@Composable
+private fun RowScope.Tool(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.weight(1f).fillMaxHeight(),
+        shape = RectangleShape,
+        contentPadding = PaddingValues(horizontal = 2.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 2,
+            textAlign = TextAlign.Center,
         )
     }
 }
