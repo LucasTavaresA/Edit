@@ -21,8 +21,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.HorizontalDivider
@@ -42,6 +47,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -242,31 +248,60 @@ private fun Editor(opened: Uri? = null) {
         }
     }
 
-    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-        // The seven share the width between them and the row is exactly as tall as one of them is
-        // wide, so every button is a square and the row ends where the screen does. Measuring the
-        // width here rather than asking the configuration for it is what keeps that true in
-        // landscape and beside a cutout, where the padding above has already taken its share.
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth().height(maxWidth / TOOLS)) {
-                Tool("New") { new() }
-                Tool("Open") { open.launch(arrayOf("*/*")) }
-                Tool("Save", enabled = file != null) { save() }
-                Tool("Save as") { saveAs.launch(name) }
-                // Select all works on the document and not on the window, which is the only way it
-                // could work: the field holds a few kilobytes of whatever is open.
-                Tool("All") { scope.launch { document.selectAll() } }
-                Tool("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
-                Tool("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
+    val safe = WindowInsets.safeDrawing
+    val pixel = with(LocalDensity.current) { 1.toDp() }
+    // The column owes the top and the sides and nothing else. The bottom, keyboard included, is
+    // the editor's to pay, and that split is what keeps the toolbar still: `safeDrawing` counts
+    // the IME, so padding the whole column with it made the row shorter the instant the keyboard
+    // came up — the row takes its height from what is left of the screen, and in landscape the
+    // keyboard is most of it.
+    Column(
+        Modifier.fillMaxSize().windowInsetsPadding(
+            safe.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
+        )
+    ) {
+        // What a file is — opening one, starting one, writing one out — is not what anyone reaches
+        // for mid-sentence, so the whole row goes while the keyboard is up and gives the screen it
+        // was taking to the text. Asking the IME inset for its height rather than asking whether a
+        // field holds focus is what makes it follow the keyboard itself: dismissing the keyboard
+        // with Back brings the row back without touching the cursor.
+        //
+        // The four share the width between them and the row is a seventh of the shorter edge tall.
+        // Measuring the edge here rather than asking the configuration for it is what keeps that
+        // right in landscape and beside a cutout, where the padding above has already taken its
+        // share; taking the shorter of the two is what stops the row being a quarter of the screen
+        // in landscape, where the width is more than twice the height.
+        if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().height(minOf(maxWidth, maxHeight) / ROW_SHARE)) {
+                    Tool("New") { new() }
+                    Tool("Open") { open.launch(arrayOf("*/*")) }
+                    Tool("Save", enabled = file != null) { save() }
+                    Tool("Save as") { saveAs.launch(name) }
+                }
             }
         }
-        Text(status, Modifier.padding(horizontal = 12.dp))
+        // These stay put whatever the keyboard does, because they are what is wanted mid-sentence:
+        // what they undo is the sentence being typed.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            // Select all works on the document and not on the window, which is the only way it
+            // could work: the field holds a few kilobytes of whatever is open.
+            Op("All") { scope.launch { document.selectAll() } }
+            Op("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
+            Op("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
+        }
+        // A pixel above and a pixel below and nothing else, so the row is as tall as the sentence
+        // in it and no taller. It is not a control and it should not be given the room of one: it
+        // says which file this is, or why a save did not happen, and it is aligned with the text
+        // below rather than with the buttons above because it is something to read.
+        Text(status, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = pixel))
         // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at that
         // width the rule reads as a bar across the screen rather than as a line under the toolbar.
-        HorizontalDivider(thickness = with(LocalDensity.current) { 1.toDp() })
+        HorizontalDivider(thickness = pixel)
         DocumentEditor(
             state = document,
-            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp)
+                .windowInsetsPadding(safe.only(WindowInsetsSides.Bottom)),
         )
     }
 
@@ -300,20 +335,30 @@ private fun Editor(opened: Uri? = null) {
     }
 }
 
-/** How many buttons the toolbar has, which is also how the width is divided. */
-private const val TOOLS = 7
+/**
+ * How much of the shorter edge the file row is tall: a seventh of it, about 58dp on a phone 411dp wide.
+ *
+ * It used to be a share per button, so that a button came out square. That was right while the row
+ * held seven and then six, and it stopped being right at four, where a square is 103dp and most of
+ * what the row shows is the black around the word. Height and count are separate questions and
+ * this is the answer to the height one: a seventh of the shorter edge is a comfortable touch row,
+ * comfortably over the 48dp the platform asks for, and it is the height the row had when it was
+ * seven squares. Tying it to a fraction rather than to a count also means taking a button out of
+ * the row no longer makes the row taller, which is a strange thing for a row to do.
+ */
+private const val ROW_SHARE = 7
 
 /**
- * One button on the toolbar: a square, and a seventh of the width.
+ * One button on the file row: an equal share of the width, however many there are.
  *
- * The row hands out its width by weight and fixes its own height to a seventh of that, so the
- * shape falls out of the arithmetic rather than being asked for — nothing here is a number chosen
- * against any one phone, and nothing is left over at the end of the row. Material's own sizing does
- * not enter into it: a weight is a fixed constraint, so the 58dp minimum width that used to push
- * the seventh button off the screen never applies.
+ * The row hands out its width by weight, so nothing is left over at the end of it and no number
+ * here was chosen against any one phone. Material's own sizing does not enter into it: a weight is a
+ * fixed constraint, so the 58dp minimum width that used to push the last button off the screen
+ * never applies.
  *
- * The shape is square rather than the pill Material gives a text button, since the pill is what
- * the ripple is cut to and a round ripple inside a square target reads as a smaller target.
+ * The shape is squared off rather than the pill Material gives a text button, since the pill is
+ * what the ripple is cut to and a round ripple inside a rectangular target reads as a smaller
+ * target than the target is.
  *
  * The type is a step down from the `labelLarge` a button would otherwise take, and that is the
  * widest label's doing: at full size "Save as" is wider than a square and wraps, which leaves one
@@ -337,4 +382,19 @@ private fun RowScope.Tool(label: String, enabled: Boolean = true, onClick: () ->
             textAlign = TextAlign.Center,
         )
     }
+}
+
+/**
+ * One button on the row that stays. These sit beside the file's name rather than in the squares
+ * above, so they are ordinary text buttons: the name needs the rest of the width, and a row that
+ * has to hold a wrapped error message cannot also be as tall as it is wide.
+ */
+@Composable
+private fun Op(label: String, enabled: Boolean = true, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RectangleShape,
+        contentPadding = PaddingValues(horizontal = 12.dp),
+    ) { Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1) }
 }

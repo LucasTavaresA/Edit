@@ -15,10 +15,19 @@
             would arrive in the middle of editing. Nothing here is read outside composition, so
             Compose sees the new configuration and lays out again on its own.
         -->
+        <!--
+            The keyboard must arrive as an inset and never as a shove. Left unsaid this is
+            `adjustUnspecified` and the system picks, which it did differently per orientation:
+            portrait resized, landscape panned — and panning slides the whole window up to keep the
+            cursor above the keyboard, which took the toolbar off the top of the screen and cut the
+            file's name in half against the status bar. Asking for resize is what makes the IME an
+            inset the layout can pay deliberately, in the one place that should pay it.
+        -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
-            android:exported="true">
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
