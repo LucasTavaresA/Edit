@@ -10,8 +10,12 @@ class Span(val at: Int, val was: Int, val now: Int)
  * How many changes are kept to be walked back. A change costs the pieces it took out — three or
  * four objects and not one byte of text — so what this bounds is not the size of a change but the
  * one thing that would otherwise grow for as long as the app is open.
+ *
+ * It is counted in keystrokes rather than in commits: every state the document passes through is
+ * recorded as it happens, so a change is now one press of a key. A save collapses the document and
+ * ends the history, so this only ever has to cover one stretch of editing between two saves.
  */
-private const val STEPS = 1024
+private const val STEPS = 16384
 
 /**
  * The document as a sequence of pieces, which is the whole of what an edit changes, and the changes
@@ -22,13 +26,25 @@ private const val STEPS = 1024
  * Undo lives here rather than above because it is the same fact from the other side. A splice knows
  * exactly which pieces it took out, and a piece names bytes that never move, so remembering a
  * change is remembering three or four objects — no text is copied and nothing is held twice.
+ *
+ * Every change is recorded, and how much one press of undo walks back is a separate question: a
+ * change carries whether it belongs to the run of changes before it, and a walk takes a whole run.
  */
 class Pieces {
 
     private val list = ArrayList<Piece>(8)
 
-    /** One change, as what it put in and what it took out, which is all that undoing one needs. */
-    private class Step(val at: Int, val added: Int, val removed: MutableList<Piece>)
+    /**
+     * One change, as what it put in and what it took out, which is all that undoing one needs.
+     * [continues] says it belongs to the run the change before it is in — a stretch of typing
+     * between two pauses — which is what one press of undo walks back.
+     */
+    private class Step(
+        val at: Int,
+        val added: Int,
+        val removed: MutableList<Piece>,
+        val continues: Boolean,
+    )
 
     private val undos = ArrayDeque<Step>()
 
@@ -52,33 +68,81 @@ class Pieces {
 
     /**
      * Replaces what stands between [from] and [to] with [added], remembers the change, and answers
-     * how much longer the document got.
+     * how much longer the document got. [continues] joins it to the change before it, so that one
+     * press of undo walks both of them back.
      */
-    fun replace(from: Int, to: Int, added: List<Piece>): Int {
+    fun replace(from: Int, to: Int, added: List<Piece>, continues: Boolean = false): Int {
         val start = from.coerceIn(0, length)
         val end = to.coerceIn(start, length)
         val was = length
         var count = 0
         for (piece in added) if (piece.length > 0) count += piece.length
+        val joins = continues && undos.isNotEmpty()
         val removed = splice(start, end, added)
-        undos.addLast(Step(start, count, removed))
-        while (undos.size > STEPS) undos.removeFirst()
+        undos.addLast(Step(start, count, removed, joins))
+        trim()
         redos.clear()
         return length - was
     }
 
-    /** Walks the last change back, and says what it covered, or null when there is none left. */
-    fun undo(): Span? = walk(undos, redos)
+    /**
+     * Drops the oldest changes past [STEPS], and never leaves half a run of them at the front: a
+     * run is what one press of undo walks, so one whose first change has gone would walk into
+     * nothing. Only the changes taken are ever trimmed — the ones waiting to be walked forward
+     * came out of that same deque and were cleared the moment anything else was typed, so the two
+     * together can never hold more than it did.
+     */
+    private fun trim() {
+        if (undos.size <= STEPS) return
+        while (undos.size > STEPS) undos.removeFirst()
+        while (undos.isNotEmpty() && undos.first().continues) undos.removeFirst()
+    }
 
-    fun redo(): Span? = walk(redos, undos)
+    /**
+     * Walks the last run of changes back, and says what it covered, or null when there is none
+     * left. Every change is recorded as it happens, so how much one press of undo takes is decided
+     * by the run each change was put in and not by how much of the typing the document had seen.
+     */
+    fun undo(): Span? = walk(undos, redos, backwards = true)
 
-    private fun walk(from: ArrayDeque<Step>, to: ArrayDeque<Step>): Span? {
-        val step = from.removeLastOrNull() ?: return null
-        var back = 0
-        for (piece in step.removed) back += piece.length
-        to.addLast(Step(step.at, back, splice(step.at, step.at + step.added, step.removed)))
-        while (to.size > STEPS) to.removeFirst()
-        return Span(step.at, step.added, back)
+    fun redo(): Span? = walk(redos, undos, backwards = false)
+
+    /**
+     * A run in one direction. Going back, the change that ends it is the one that does not continue
+     * the change before it; going forward, that same change is the one the run starts at, so it is
+     * the next one along that says whether there is more of it.
+     */
+    private fun walk(from: ArrayDeque<Step>, to: ArrayDeque<Step>, backwards: Boolean): Span? {
+        if (from.isEmpty()) return null
+        // What the run covered, in the coordinates the document had before any of it was walked.
+        // Each change is expressed in the document the one before it left, so each is mapped back
+        // through what the run has done so far — which is one splice, because what it has covered
+        // is one range: below [low] both frames agree, and above it they differ by [delta].
+        var low = -1
+        var high = -1
+        var delta = 0
+        while (true) {
+            val step = from.removeLast()
+            var back = 0
+            for (piece in step.removed) back += piece.length
+            to.addLast(Step(step.at, back, splice(step.at, step.at + step.added, step.removed), step.continues))
+            val end = step.at + step.added
+            val at = when {
+                low < 0 || step.at <= low -> step.at
+                step.at >= high + delta -> step.at - delta
+                else -> low
+            }
+            val stop = when {
+                low < 0 || end <= low -> end
+                end >= high + delta -> end - delta
+                else -> high
+            }
+            low = if (low < 0) at else minOf(low, at)
+            high = if (high < 0) stop else maxOf(high, stop)
+            delta += back - step.added
+            if (if (backwards) !step.continues else from.lastOrNull()?.continues != true) break
+        }
+        return Span(low, high - low, high - low + delta)
     }
 
     /**

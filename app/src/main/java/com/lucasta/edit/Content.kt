@@ -196,9 +196,12 @@ class Content private constructor(
      * Replaces the bytes between [from] and [to] with [bytes], and answers how much longer the
      * document got. Nothing is copied but the pieces themselves: [bytes] goes on the end of the
      * typed buffer and the sequence is rewritten around it.
+     *
+     * [continues] says this change belongs to the run the one before it is in, which is what one
+     * press of undo walks back. Every change is recorded either way.
      */
-    fun replace(from: Int, to: Int, bytes: ByteArray): Int {
-        val delta = pieces.replace(from, to, listOfNotNull(append(bytes)))
+    fun replace(from: Int, to: Int, bytes: ByteArray, continues: Boolean = false): Int {
+        val delta = pieces.replace(from, to, listOfNotNull(append(bytes)), continues)
         settle()
         return delta
     }
@@ -207,7 +210,7 @@ class Content private constructor(
 
     val canRedo: Boolean get() = pieces.canRedo
 
-    /** Walks the last change back, and says what it covered, or null when there is none left. */
+    /** Walks the last run of changes back, and says what it covered, or null when there is none. */
     fun undo(): Span? = pieces.undo()
 
     fun redo(): Span? = pieces.redo()

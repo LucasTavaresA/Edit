@@ -1,5 +1,6 @@
 package com.lucasta.edit
 
+import android.os.SystemClock
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
@@ -32,6 +33,14 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.SpanStyle
@@ -74,6 +83,17 @@ private const val WINDOW_MAX = CHUNK_MAX * (2 * WINDOW_CHUNKS + 2)
  * to get going and hand the answer back.
  */
 private const val INDEX_OFF_THREAD = 256 * 1024
+
+/**
+ * How long a stretch of typing may pause before what comes next is a change of its own.
+ *
+ * Every keystroke is recorded, so this decides only how many of them one press of undo walks back,
+ * which is a question about what feels like one edit rather than about what the document knows. It
+ * is the interval a text field's own history breaks on, because that is the behaviour being matched:
+ * an undo asked for from the keyboard used to be answered by the field and now is not, and it should
+ * still take back about as much.
+ */
+private const val PAUSE_MILLIS = 5_000L
 
 /** Blank space under the last line, so the end of a file is not stuck against the bottom edge. */
 private val TAIL = 160.dp
@@ -134,6 +154,18 @@ class DocumentState : Closeable {
         private set
 
     /**
+     * How long the document is in the offsets the rows are drawn at, which is not how long it
+     * actually is while the window is holding changes they have not been told about. Everything
+     * outside the window is addressed in this, and [shifted] is the way back into the document's
+     * own offsets.
+     */
+    val length: Int get() = content.length - recorded
+
+    /** What the window has gained since [commit], as the document has it. */
+    private val recorded: Int
+        get() = if (windowStart < 0) 0 else windowSlice.bytes + windowBreak - (windowEnd - windowStart)
+
+    /**
      * A selection reaching outside the window, in the document's bytes, or null when the field's
      * own selection is the whole of it. The field holds a few kilobytes and the document may hold a
      * gigabyte, so a selection that large is drawn by the rows and applied by [swallow] — the field
@@ -142,7 +174,7 @@ class DocumentState : Closeable {
     var marked: TextRange? by mutableStateOf(null)
         private set
 
-    /** Whether there is anything to walk back: a change taken, or one the window is still holding. */
+    /** Whether there is anything to walk back, which is only ever what the change list holds. */
     var canUndo by mutableStateOf(false)
         private set
 
@@ -154,6 +186,29 @@ class DocumentState : Closeable {
 
     /** The line break at the end of the window's range, in bytes, which the field does not hold. */
     private var windowBreak = 0
+
+    /**
+     * Whether the document is holding changes the rows have not been told about.
+     *
+     * Every keystroke goes into the document as it happens — see [record] — but everything typed
+     * lands inside the window, so every row outside it is drawing exactly the text it was drawing
+     * before and only its offsets have moved. Telling them is what costs: re-indexing chunks and
+     * shifting every key after the cursor, per keystroke, on a document of any size. So the rows go
+     * on addressing the document as it was when the window opened, and [commit] is what moves them
+     * on — which is what already happens whenever the window is cut, saved or walked back.
+     */
+    private var behind = false
+
+    /**
+     * When the last change was recorded, and where it left the text standing. A change joins the
+     * run before it when it arrives soon enough after it and starts where it ended, or ends where
+     * it began — which is typing carried on, backspacing carried on, and nothing else.
+     */
+    private var lastAt = 0L
+
+    private var lastFrom = -1
+
+    private var lastTo = -1
 
     /**
      * Where the row at the top of the screen starts, and where the last one on it does, kept
@@ -219,6 +274,8 @@ class DocumentState : Closeable {
         windowStart = -1
         windowEnd = -1
         focusFor = -1
+        behind = false
+        lastFrom = -1
         windowBreak = 0
         windowSlice = Slice("", 0, value.encoding, intArrayOf(0, 0))
         marked = null
@@ -242,6 +299,9 @@ class DocumentState : Closeable {
             write(content)
         } finally {
             writing = false
+            // A save ends the history — the document starts again from the file it has just
+            // written — so what the buttons say about it has to be asked again.
+            track()
         }
     }
 
@@ -321,6 +381,11 @@ class DocumentState : Closeable {
     suspend fun follow() {
         if (writing || windowStart < 0) return
         if (swallow()) return
+        // Before anything that suspends, so that what the field holds reaches the change list while
+        // it is still what the field holds. This flow conflates, so keystrokes arriving faster than
+        // a frame are recorded as one change — which is what a run of typing is grouped into
+        // anyway, and nothing is lost by it.
+        record()
         track()
         // The layout that says where the cursor is drawn is a frame behind whatever was just typed,
         // and both of the things below read it. Waiting for it also means that however fast input
@@ -332,7 +397,7 @@ class DocumentState : Closeable {
         if (!selection.collapsed || whole) return
         val text = window.text
         val nearStart = selection.min < WINDOW_GUARD && windowStart > 0
-        val nearEnd = selection.max > text.length - WINDOW_GUARD && windowEnd < content.length
+        val nearEnd = selection.max > text.length - WINDOW_GUARD && windowEnd < length
         val tooLong = text.length > WINDOW_MAX
         if (!nearStart && !nearEnd && !tooLong) return
         // Where the cursor is, closely enough to decide which chunks the window should cover. It
@@ -402,29 +467,56 @@ class DocumentState : Closeable {
     }
 
     /**
-     * Writes what the window changed back into the document without closing it: the field keeps its
-     * text, its selection and its focus, and only the offsets around it move.
+     * Writes whatever the field has changed into the document, as a change of its own.
+     *
+     * Called for every change to the field, so that every state the text passes through is in the
+     * change list. The keyboard's own undo is not the only thing that can take text back, and text
+     * the document never saw cannot be brought back by anything — which is the whole of why this
+     * no longer waits for the window to have to move.
      *
      * What goes in is the run the typing actually touched and not the whole window — the window is
-     * a few thousand bytes and almost none of it was typed, and committing all of it would fill the
-     * typed buffer with text nobody typed and leave the file's own bytes for that run behind, which
-     * is exactly what byte pieces exist to avoid.
+     * a few thousand bytes and almost none of it was typed, and writing all of it back would fill
+     * the typed buffer with text nobody typed and leave the file's own bytes for that run behind,
+     * which is exactly what byte pieces exist to avoid.
+     *
+     * The rows are not told. See [behind].
      */
-    private fun commit() {
+    private fun record() {
         if (windowStart < 0) return
         val now = window.text
         val change = change(windowSlice.text, now) ?: return
         val from = windowStart + windowSlice.byteAt(change.from)
         val to = windowStart + windowSlice.byteAt(change.was)
         val typed = content.encoding.encode(now, change.from, change.now)
-        val delta = content.replace(from, to, typed)
-
-        windowEnd += delta
-        // Strictly past the edit, not merely at it: an insertion has [to] equal to its own start,
-        // and text inserted at the top row's start belongs to that row rather than above it.
-        if (visibleFrom > from && visibleFrom >= to) visibleFrom += delta
+        val at = SystemClock.elapsedRealtime()
+        val joins = lastFrom >= 0 && at - lastAt < PAUSE_MILLIS && (from == lastTo || to == lastFrom)
+        content.replace(from, to, typed, joins)
         windowSlice = windowSlice.replacing(change.from, change.was, now.subSequence(change.from, change.now), typed.size)
-        chunks = if (whole) intArrayOf(0) else respan(chunks, from, to, delta, content, content.encoding, content.length)
+        lastAt = at
+        lastFrom = from
+        lastTo = from + typed.size
+        behind = true
+    }
+
+    /**
+     * Brings the rows up to what the document holds, without closing the window: the field keeps
+     * its text, its selection and its focus, and only the offsets around it move.
+     *
+     * The whole of the window's range is re-indexed rather than the run that was typed, because by
+     * now that may be a hundred separate changes and they are all inside it anyway.
+     */
+    private fun commit() {
+        record()
+        if (windowStart < 0 || !behind) return
+        val to = windowEnd
+        val delta = recorded
+        windowEnd = to + delta
+        // Strictly past the window, not merely at it: text inserted at the top row's start belongs
+        // to that row rather than above it, and the window's own start is where such text lands.
+        if (visibleFrom > windowStart && visibleFrom >= to) visibleFrom += delta
+        chunks = if (whole) intArrayOf(0)
+        else respan(chunks, windowStart, to, delta, content, content.encoding, content.length)
+        behind = false
         version++
     }
 
@@ -456,8 +548,12 @@ class DocumentState : Closeable {
             this.selection = local
         }
         // The field keeps its own history of what it held, which after a cut is somebody else's
-        // text at somebody else's offsets. The document's own history is what undo walks.
+        // text at somebody else's offsets. The document's own history is what undo walks, and the
+        // keys that ask for one are taken before the field ever sees them — see [undoKey].
         window.undoState.clearHistory()
+        behind = false
+        // Nothing typed after the window moved carries on from anything typed before it.
+        lastFrom = -1
         focusFor = windowStart
         opened++
     }
@@ -528,24 +624,28 @@ class DocumentState : Closeable {
 
     /** First chunk of a window holding the cursor's chunk [index], clamped as [reach] describes. */
     private fun windowFirst(index: Int): Int {
-        val anchor = chunkIndexAt(chunks, visibleFrom.coerceIn(0, content.length))
+        val anchor = chunkIndexAt(chunks, visibleFrom.coerceIn(0, length))
         return (index - WINDOW_CHUNKS).coerceIn(minOf(anchor, index), index)
     }
 
-    /** Where a window holding the cursor's chunk [index] ends. */
+    /**
+     * Where a window holding the cursor's chunk [index] ends. In the rows' own offsets, like the
+     * chunk index it reads: asked before a commit it has to answer about the window standing there
+     * now, and after one the two are the same thing anyway.
+     */
     private fun windowLast(index: Int): Int =
-        chunkEndAt(chunks, (index + WINDOW_CHUNKS).coerceAtMost(chunks.size - 1), content.length)
+        chunkEndAt(chunks, (index + WINDOW_CHUNKS).coerceAtMost(chunks.size - 1), length)
 
-    private fun rowsNow() = Rows(chunks, content.length, windowStart, windowEnd)
+    private fun rowsNow() = Rows(chunks, length, windowStart, windowEnd)
 
     private fun changed() {
         version++
         track()
     }
 
-    /** Whether the window is holding a change the document has not taken yet. */
+    /** What the buttons say, which is now only ever what the document says: see [record]. */
     private fun track() {
-        canUndo = content.canUndo || (windowStart >= 0 && change(windowSlice.text, window.text) != null)
+        canUndo = content.canUndo
         canRedo = content.canRedo
     }
 
@@ -606,7 +706,7 @@ private class Rows(
 @Composable
 fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
     val rows = remember(state.version, state.chunks, state.windowStart, state.windowEnd) {
-        Rows(state.chunks, state.content.length, state.windowStart, state.windowEnd)
+        Rows(state.chunks, state.length, state.windowStart, state.windowEnd)
     }
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -633,7 +733,7 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
     // field each consume their own taps and the list consumes a drag, so what is left to arrive
     // here is a tap that landed on nothing, and the end of the document is what lies under it.
     val onGround = Modifier.pointerInput(state) {
-        detectTapGestures { scope.launch { state.focus(state.content.length) } }
+        detectTapGestures { scope.launch { state.focus(state.length) } }
     }
     // Every row is keyed on where it starts, the window included, so a key always means the same
     // place in the document. Keying the window on itself instead would let the list follow it
@@ -708,6 +808,7 @@ private fun ChunkRow(state: DocumentState, start: Int, end: Int, scope: Coroutin
 private fun WindowRow(state: DocumentState, start: Int) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
+    val scope = rememberCoroutineScope()
     LaunchedEffect(state.opened, start) {
         if (state.wantsFocus(start)) {
             withFrameNanos { }
@@ -724,11 +825,39 @@ private fun WindowRow(state: DocumentState, start: Int) {
         modifier = Modifier
             .fillMaxWidth()
             .focusRequester(focus)
-            .onFocusChanged { if (it.isFocused) state.focusTaken(start) },
+            .onFocusChanged { if (it.isFocused) state.focusTaken(start) }
+            .onPreviewKeyEvent { event -> undoKey(event, state, scope) },
         textStyle = LocalTextStyle.current.copy(color = LocalContentColor.current),
         onTextLayout = { result -> result()?.let { state.laidOut(it) } },
         cursorBrush = SolidColor(LocalContentColor.current),
     )
+}
+
+/**
+ * The keyboard's own undo and redo, taken before the field can answer them.
+ *
+ * They arrive as ordinary key events — ctrl+Z and ctrl+Y — and a text field answers them out of a
+ * history of its own: scratch that every cut of the window throws away, and that the document knows
+ * nothing about. Where the two met, typing was destroyed for good, because text the field took back
+ * had never been written into the document and the field's way forward went with the next cut. So
+ * they belong to the change list exactly as the toolbar's own buttons do, and the field is left with
+ * no history to answer out of.
+ *
+ * Both directions are consumed whichever way they arrive, key up included, so that nothing of them
+ * reaches the field. Ctrl+shift+Z is taken as a redo alongside ctrl+Y: it is what the other half of
+ * the world's keyboards send, and it means nothing here otherwise.
+ */
+private fun undoKey(event: KeyEvent, state: DocumentState, scope: CoroutineScope): Boolean {
+    if (!event.isCtrlPressed) return false
+    val forward = when (event.key) {
+        Key.Y -> true
+        Key.Z -> event.isShiftPressed
+        else -> return false
+    }
+    if (event.type == KeyEventType.KeyDown) {
+        scope.launch { if (forward) state.redo() else state.undo() }
+    }
+    return true
 }
 
 /** What a long press selects: the run of word characters under it, or nothing if there is none. */
