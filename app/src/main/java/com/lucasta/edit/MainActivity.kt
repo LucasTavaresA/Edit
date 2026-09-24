@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -40,22 +41,32 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.seconds
 import android.graphics.Color as ArgbColor
 
 class MainActivity : ComponentActivity() {
@@ -159,6 +170,38 @@ private const val UNTITLED = "untitled.txt"
  */
 private const val NO_FILE = "no file"
 
+/**
+ * How long something said keeps the bar that names the file on screen while the keyboard is up,
+ * where it otherwise goes with the row above it to give the text the room.
+ */
+private enum class Hold {
+    /** Not at all: a file opening or saving while it runs, and New. They wait for the keyboard to go. */
+    Never,
+
+    /** [HOLD_TIME] and no longer: a file just opened or just saved, long enough to catch which. */
+    Briefly,
+
+    /**
+     * Until [HOLD_TIME] after the user next presses anywhere on the screen or changes the text,
+     * which is what a warning gets. Waiting for the user rather than for a clock is what stops a
+     * warning coming and going while nobody was looking, and the time after is what stops the touch
+     * that noticed it from taking it away before it is read.
+     */
+    UntilSeen,
+}
+
+/** How long [Hold.Briefly] holds, and how long [Hold.UntilSeen] goes on holding once the user is back. */
+private val HOLD_TIME = 2.seconds
+
+/**
+ * What the bar that names the file is saying, and whether it is still holding the bar over the
+ * keyboard to say it. A new one for every message, the same message again included, so that each
+ * holds for its own time and ending one hold can never end the next.
+ */
+private class Notice(val text: String, val hold: Hold) {
+    var holding by mutableStateOf(hold != Hold.Never)
+}
+
 @Composable
 private fun Editor(opened: Uri? = null) {
     val context = LocalContext.current
@@ -166,19 +209,43 @@ private fun Editor(opened: Uri? = null) {
     val document = remember { DocumentState() }
     var file by remember { mutableStateOf<Uri?>(null) }
     var name by remember { mutableStateOf(UNTITLED) }
-    var status by remember { mutableStateOf(NO_FILE) }
+    var notice by remember { mutableStateOf(Notice(NO_FILE, Hold.Never)) }
+    var touches by remember { mutableIntStateOf(0) }
     var asking by remember { mutableStateOf(false) }
 
     // The document holds a descriptor open on the file it was opened on, for as long as it is the
     // open document. Nothing else is holding it, so this is where it is let go.
     DisposableEffect(document) { onDispose { document.close() } }
 
+    /**
+     * Puts [message] in the bar that names the file, which is where everything the app has to say
+     * goes: which file is open, that one is opening or saving, that it saved, and why it could not
+     * be opened or saved. [hold] is how long it keeps the bar over the keyboard to say it.
+     */
+    fun say(message: String, hold: Hold = Hold.Never) {
+        notice = Notice(message, hold)
+    }
+
+    LaunchedEffect(notice) {
+        val said = notice
+        if (!said.holding) return@LaunchedEffect
+        if (said.hold == Hold.UntilSeen) {
+            // The next press anywhere on the screen, or the next thing the keyboard does to the
+            // text — which reaches the field without passing through the screen's touches at all.
+            snapshotFlow { Triple(touches, document.window.text, document.window.selection) }
+                .drop(1)
+                .first()
+        }
+        delay(HOLD_TIME)
+        said.holding = false
+    }
+
     suspend fun load(uri: Uri) {
         heap("before")
         // Opening no longer reads the file, but it does index it for chunk boundaries, and that is
         // a pass over the whole thing: seconds for a file of a gigabyte. Say so rather than look
         // like nothing happened.
-        status = "opening ${displayName(context, uri)}"
+        say("opening ${displayName(context, uri)}")
         timed("open") {
             openDocument(context, uri)
                 .onSuccess {
@@ -187,21 +254,21 @@ private fun Editor(opened: Uri? = null) {
                     heap("after")
                     file = uri
                     name = displayName(context, uri)
-                    status = name
+                    say(name, Hold.Briefly)
                 }
-                .onFailure { status = "could not open: ${it.message}" }
+                .onFailure { say("could not open: ${it.message}", Hold.UntilSeen) }
         }
     }
 
     suspend fun write(target: Uri) {
-        status = "saving ${displayName(context, target)}"
+        say("saving ${displayName(context, target)}")
         document.withContent { saveDocument(context, target, it) }
             .onSuccess {
                 file = target
                 name = displayName(context, target)
-                status = "saved $name"
+                say("saved $name", Hold.Briefly)
             }
-            .onFailure { status = "could not save: ${it.message}" }
+            .onFailure { say("could not save: ${it.message}", Hold.UntilSeen) }
     }
 
     /**
@@ -215,7 +282,7 @@ private fun Editor(opened: Uri? = null) {
             document.focus(0)
             file = null
             name = UNTITLED
-            status = NO_FILE
+            say(NO_FILE)
         }
     }
 
@@ -242,67 +309,97 @@ private fun Editor(opened: Uri? = null) {
             when (collision(context, target, document.content)) {
                 Collision.None -> write(target)
                 Collision.Replaced -> asking = true
-                Collision.Rewritten ->
-                    status = "$name was rewritten while it was open, so this document is no longer all of it"
+                Collision.Rewritten -> say(
+                    "$name was rewritten while it was open, so this document is no longer all of it",
+                    Hold.UntilSeen,
+                )
             }
         }
     }
 
     val safe = WindowInsets.safeDrawing
     val pixel = with(LocalDensity.current) { 1.toDp() }
+    val typing = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     // The column owes the top and the sides and nothing else. The bottom, keyboard included, is
-    // the editor's to pay, and that split is what keeps the toolbar still: `safeDrawing` counts
+    // the bottom row's to pay, and that split is what keeps the toolbar still: `safeDrawing` counts
     // the IME, so padding the whole column with it made the row shorter the instant the keyboard
     // came up — the row takes its height from what is left of the screen, and in landscape the
     // keyboard is most of it.
     Column(
-        Modifier.fillMaxSize().windowInsetsPadding(
-            safe.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top)
-        )
+        Modifier
+            .fillMaxSize()
+            // Every press on the screen, seen on its way down to whatever it lands on and taken
+            // from nobody. A warning waits for one before it starts to go.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        if (awaitPointerEvent(PointerEventPass.Initial).type == PointerEventType.Press) touches++
+                    }
+                }
+            }
+            .windowInsetsPadding(safe.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
     ) {
-        // What a file is — opening one, starting one, writing one out — is not what anyone reaches
-        // for mid-sentence, so the whole row goes while the keyboard is up and gives the screen it
-        // was taking to the text. Asking the IME inset for its height rather than asking whether a
-        // field holds focus is what makes it follow the keyboard itself: dismissing the keyboard
-        // with Back brings the row back without touching the cursor.
+        // What a file is — opening one, starting one, writing one out, which one is open — is not
+        // what anyone needs mid-sentence, so the row, the name and the rule under them all go while
+        // the keyboard is up and give the screen they were taking to the text. Asking the IME inset
+        // for its height rather than asking whether a field holds focus is what makes them follow
+        // the keyboard itself: dismissing the keyboard with Back brings them back without touching
+        // the cursor.
         //
-        // The four share the width between them and the row is a seventh of the shorter edge tall.
+        // The three share the width between them and the row is a seventh of the shorter edge tall.
         // Measuring the edge here rather than asking the configuration for it is what keeps that
         // right in landscape and beside a cutout, where the padding above has already taken its
         // share; taking the shorter of the two is what stops the row being a quarter of the screen
         // in landscape, where the width is more than twice the height.
-        if (WindowInsets.ime.getBottom(LocalDensity.current) == 0) {
+        if (!typing) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth().height(minOf(maxWidth, maxHeight) / ROW_SHARE)) {
                     Tool("New") { new() }
                     Tool("Open") { open.launch(arrayOf("*/*")) }
-                    Tool("Save", enabled = file != null) { save() }
                     Tool("Save as") { saveAs.launch(name) }
                 }
             }
         }
-        // These stay put whatever the keyboard does, because they are what is wanted mid-sentence:
-        // what they undo is the sentence being typed.
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            // Select all works on the document and not on the window, which is the only way it
-            // could work: the field holds a few kilobytes of whatever is open.
-            Op("All") { scope.launch { document.selectAll() } }
-            Op("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
-            Op("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
+        // The name and its rule are the exception, for as long as what the bar is saying holds them
+        // over the keyboard — see [Hold]. They push the text down rather than cover it, so the
+        // cursor can never be under them.
+        if (!typing || notice.holding) {
+            // A pixel above and a pixel below and nothing else, so the row is as tall as the
+            // sentence in it and no taller. It is not a control and it should not be given the room
+            // of one: it says which file this is, or what just happened to it, and it is aligned
+            // with the text below rather than with the buttons above because it is something to
+            // read.
+            Text(notice.text, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = pixel))
+            // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at
+            // that width the rule reads as a bar across the screen rather than as a line under the
+            // toolbar.
+            HorizontalDivider(thickness = pixel)
         }
-        // A pixel above and a pixel below and nothing else, so the row is as tall as the sentence
-        // in it and no taller. It is not a control and it should not be given the room of one: it
-        // says which file this is, or why a save did not happen, and it is aligned with the text
-        // below rather than with the buttons above because it is something to read.
-        Text(status, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = pixel))
-        // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at that
-        // width the rule reads as a bar across the screen rather than as a line under the toolbar.
-        HorizontalDivider(thickness = pixel)
         DocumentEditor(
             state = document,
-            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp)
-                .windowInsetsPadding(safe.only(WindowInsetsSides.Bottom)),
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
         )
+        HorizontalDivider(thickness = pixel)
+        // These are what is wanted mid-sentence — what they undo is the sentence being typed, and
+        // saving is what ends it — so they sit at the bottom and ride on top of the keyboard. This
+        // row is what sits against the keyboard, so it is the one that pays the bottom inset.
+        //
+        // Material pads every button out to a 48dp touch target, and in landscape with the keyboard
+        // up that padding is taken straight from the few lines of text left. Turning it off here
+        // lets [OP_HEIGHT] be the whole of the row.
+        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+            Row(
+                Modifier.fillMaxWidth().windowInsetsPadding(safe.only(WindowInsetsSides.Bottom)),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Select all works on the document and not on the window, which is the only way it
+                // could work: the field holds a few kilobytes of whatever is open.
+                Op("All") { scope.launch { document.selectAll() } }
+                Op("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
+                Op("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
+                Op("Save", enabled = file != null) { save() }
+            }
+        }
     }
 
     if (asking) {
@@ -385,15 +482,23 @@ private fun RowScope.Tool(label: String, enabled: Boolean = true, onClick: () ->
 }
 
 /**
- * One button on the row that stays. These sit beside the file's name rather than in the squares
- * above, so they are ordinary text buttons: the name needs the rest of the width, and a row that
- * has to hold a wrapped error message cannot also be as tall as it is wide.
+ * How tall the row over the keyboard is. Under the 48dp Material asks for, because in landscape the
+ * keyboard leaves about three lines of text and the row's height comes out of them; 36dp is still a
+ * comfortable target for a thumb, and the buttons are wide, so a tap near one lands on it.
+ */
+private val OP_HEIGHT = 36.dp
+
+/**
+ * One button on the row that stays, at the bottom over the keyboard. These are ordinary text
+ * buttons rather than the squares of the file row: the row is on screen while typing, so every
+ * pixel of height it takes is taken from the text.
  */
 @Composable
 private fun Op(label: String, enabled: Boolean = true, onClick: () -> Unit) {
     TextButton(
         onClick = onClick,
         enabled = enabled,
+        modifier = Modifier.height(OP_HEIGHT),
         shape = RectangleShape,
         contentPadding = PaddingValues(horizontal = 12.dp),
     ) { Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1) }
