@@ -18,5 +18,5 @@ internal fun looksEncrypted(header: ByteArray): Boolean = magics.any { header.st
 suspend fun readEncryptedDocument(context: Context, uri: Uri): Result<Content> =
     Result.failure(NotSupported("encrypted files cannot be opened yet"))
 
-suspend fun writeEncryptedDocument(context: Context, uri: Uri, content: Content): Result<Unit> =
+suspend fun writeEncryptedDocument(context: Context, uri: Uri, content: Content, anyway: Boolean): Result<Collision> =
     Result.failure(NotSupported("encrypted files cannot be saved yet"))

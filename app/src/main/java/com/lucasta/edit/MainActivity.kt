@@ -66,6 +66,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.time.Duration.Companion.seconds
 import android.graphics.Color as ArgbColor
 
@@ -202,6 +204,25 @@ private class Notice(val text: String, val hold: Hold) {
     var holding by mutableStateOf(hold != Hold.Never)
 }
 
+/**
+ * Opening a file, New and saving take turns: one at a time, in the order they were asked for. A
+ * save writes in place into the very file the document's descriptor is open on, so a second save
+ * running alongside it reads that file half rewritten and writes what it read over it — or finds
+ * it changing and reports our own save as somebody else's. Opening a file or New closes the
+ * descriptor a save is reading through. Nothing is refused and no button goes off while one of
+ * them runs: whatever is asked for meanwhile waits for it.
+ *
+ * The turns are the process's rather than one screen's. Another app handing a file over can start a
+ * second copy of Edit beside the first, and both run here, so taking turns across the two is what
+ * stops them writing the same file at once, or one opening a file the other is halfway through
+ * writing.
+ */
+private val turns = Mutex()
+
+/** Why a document whose file was rewritten in place under it is not saved. */
+private fun rewritten(name: String) =
+    "$name was rewritten while it was open, so this document is no longer all of it"
+
 @Composable
 private fun Editor(opened: Uri? = null) {
     val context = LocalContext.current
@@ -212,6 +233,19 @@ private fun Editor(opened: Uri? = null) {
     var notice by remember { mutableStateOf(Notice(NO_FILE, Hold.Never)) }
     var touches by remember { mutableIntStateOf(0) }
     var asking by remember { mutableStateOf(false) }
+
+    /**
+     * Whether a save is waiting for its turn. Pressing Save again joins it rather than queueing
+     * another behind it: a save writes the document as it stands when its turn comes, so the one
+     * waiting already takes in everything done up to then.
+     */
+    var saveWaiting by remember { mutableStateOf(false) }
+
+    /**
+     * The document's [DocumentState.version] when [file] last held exactly what it holds: just
+     * opened, or just saved. A save that finds nothing changed since has nothing to write.
+     */
+    var inStep by remember { mutableIntStateOf(-1) }
 
     // The document holds a descriptor open on the file it was opened on, for as long as it is the
     // open document. Nothing else is holding it, so this is where it is let go.
@@ -240,6 +274,11 @@ private fun Editor(opened: Uri? = null) {
         said.holding = false
     }
 
+    /** Runs [task] once every file operation asked for before it has finished. */
+    fun inTurn(task: suspend () -> Unit) {
+        scope.launch { turns.withLock { task() } }
+    }
+
     suspend fun load(uri: Uri) {
         heap("before")
         // Opening no longer reads the file, but it does index it for chunk boundaries, and that is
@@ -253,6 +292,7 @@ private fun Editor(opened: Uri? = null) {
                     frameAfterNext("layout")
                     heap("after")
                     file = uri
+                    inStep = document.version
                     name = displayName(context, uri)
                     say(name, Hold.Briefly)
                 }
@@ -260,13 +300,34 @@ private fun Editor(opened: Uri? = null) {
         }
     }
 
-    suspend fun write(target: Uri) {
+    /**
+     * Writes the document into [target]. Unless [anyway], only into the file it was last in step
+     * with, exactly as it was left — see [saveDocument].
+     */
+    suspend fun write(target: Uri, anyway: Boolean) {
         say("saving ${displayName(context, target)}")
-        document.withContent { saveDocument(context, target, it) }
-            .onSuccess {
-                file = target
-                name = displayName(context, target)
-                say("saved $name", Hold.Briefly)
+        document.withContent { saveDocument(context, target, it, anyway) }
+            .onSuccess { found ->
+                when (found) {
+                    Collision.None -> {
+                        file = target
+                        // Nothing can move the version while a write runs, so this is the one it wrote.
+                        inStep = document.version
+                        name = displayName(context, target)
+                        say("saved $name", Hold.Briefly)
+                    }
+                    // The file holds something other than the document, found before anything was
+                    // written or arriving while it was. The document is still what was to be saved,
+                    // so the question is whose version the file keeps — and after Save as, the file
+                    // in question is the one it was saved as.
+                    Collision.Replaced -> {
+                        file = target
+                        name = displayName(context, target)
+                        say(name)
+                        asking = true
+                    }
+                    Collision.Rewritten -> say(rewritten(name), Hold.UntilSeen)
+                }
             }
             .onFailure { say("could not save: ${it.message}", Hold.UntilSeen) }
     }
@@ -277,7 +338,7 @@ private fun Editor(opened: Uri? = null) {
      * something to put in it.
      */
     fun new() {
-        scope.launch {
+        inTurn {
             document.load(Content.empty())
             document.focus(0)
             file = null
@@ -286,33 +347,42 @@ private fun Editor(opened: Uri? = null) {
         }
     }
 
-    LaunchedEffect(opened) { opened?.let { load(it) } }
+    LaunchedEffect(opened) { opened?.let { inTurn { load(it) } } }
 
     val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
         picked ?: return@rememberLauncherForActivityResult
-        scope.launch { load(picked) }
+        inTurn { load(picked) }
     }
 
     val saveAs = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { created ->
         created ?: return@rememberLauncherForActivityResult
-        scope.launch { write(created) }
+        inTurn { write(created, anyway = true) }
     }
 
     /**
      * Saving asks first if the file is no longer the one that was opened. The document itself is
      * fine either way — the descriptor kept it — so the only question is whose version the file
      * ends up holding, and that is the user's to answer and not ours.
+     *
+     * The check and the write are one operation, so the check can never be looking at a file that
+     * one of our own saves is halfway through rewriting. Which file, and what goes into it, are
+     * both taken when the save's turn comes rather than when Save was pressed: a file opened in
+     * between is the document by then, and writing it into the file it replaced would be worse
+     * than saving nothing. The write checks again as it writes, and asks the same question if the
+     * answer has changed by then.
      */
     fun save() {
-        val target = file ?: return
-        scope.launch {
+        if (saveWaiting) return
+        saveWaiting = true
+        inTurn {
+            saveWaiting = false
+            val target = file ?: return@inTurn
             when (collision(context, target, document.content)) {
-                Collision.None -> write(target)
+                Collision.None ->
+                    if (document.unchangedSince(inStep)) say("saved $name", Hold.Briefly)
+                    else write(target, anyway = false)
                 Collision.Replaced -> asking = true
-                Collision.Rewritten -> say(
-                    "$name was rewritten while it was open, so this document is no longer all of it",
-                    Hold.UntilSeen,
-                )
+                Collision.Rewritten -> say(rewritten(name), Hold.UntilSeen)
             }
         }
     }
@@ -408,15 +478,15 @@ private fun Editor(opened: Uri? = null) {
             title = { Text("$name changed") },
             text = {
                 Text(
-                    "Something else replaced it since it was opened. This document is still what " +
-                        "the file held then, with your edits in it. Saving puts that over whatever " +
-                        "is there now."
+                    "Something else changed it since it was opened or last saved. This document is " +
+                        "still what the file held then, with your edits in it. Saving puts that over " +
+                        "whatever is there now."
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
                     asking = false
-                    file?.let { target -> scope.launch { write(target) } }
+                    inTurn { file?.let { write(it, anyway = true) } }
                 }) { Text("Overwrite") }
             },
             dismissButton = {

@@ -303,6 +303,15 @@ class DocumentState : Closeable {
         }
     }
 
+    /**
+     * Whether the document is still what it was at [version], counting whatever the window holds
+     * that has not been recorded yet — typing that arrived while a write was running included.
+     * Moving the window moves [version] too, so a document nobody changed can be answered no, and
+     * one somebody did is never answered yes.
+     */
+    fun unchangedSince(version: Int): Boolean =
+        version == this.version && !behind && (windowStart < 0 || change(windowSlice.text, window.text) == null)
+
     /** Puts the cursor at [offset], moving the window there. Both offsets are the document's bytes. */
     suspend fun focus(offset: Int, selection: TextRange? = null) {
         if (writing) return

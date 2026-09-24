@@ -110,21 +110,28 @@ suspend fun openDocument(context: Context, uri: Uri): Result<Content> = withCont
     }
 }
 
-suspend fun saveDocument(context: Context, uri: Uri, content: Content): Result<Unit> =
+/**
+ * Writes [content] over [uri] and answers [Collision.None], or answers what it found instead. Unless
+ * [anyway], the file has to still be exactly the one the document was last in step with.
+ */
+suspend fun saveDocument(context: Context, uri: Uri, content: Content, anyway: Boolean): Result<Collision> =
     when (content.format) {
-        Format.Plain -> writePlainDocument(context, uri, content)
-        Format.Encrypted -> writeEncryptedDocument(context, uri, content)
+        Format.Plain -> writePlainDocument(context, uri, content, anyway)
+        Format.Encrypted -> writeEncryptedDocument(context, uri, content, anyway)
     }
 
 /** What stands between the document and the file it was opened on. */
 enum class Collision {
-    /** The file is where we left it, byte for byte. */
+    /** The file is where we left it, byte for byte. Answered by a save, it now holds the document. */
     None,
 
     /**
      * Something replaced the file since it was opened — sync brought a newer version. Our own copy
      * is intact, because the descriptor pinned what it was opened on, so the only question is whose
      * version the file ends up holding, and that is the user's to answer.
+     *
+     * A save answers it too when the file changed under it while it was writing, and then the
+     * document is exactly what it wrote: nothing is missing from it, only from the file.
      */
     Replaced,
 
@@ -140,6 +147,9 @@ enum class Collision {
  * Whether [uri] is still the file [content] was opened on. Costs one open and one `fstat` — where a
  * hash would cost a full read of the file to learn the same thing, and could still only ever say
  * that bytes are gone, never bring them back.
+ *
+ * A save asks the same again once the descriptor it writes with is open, and that is the answer that
+ * counts. This one is so the question comes before seconds of writing a temporary rather than after.
  */
 suspend fun collision(context: Context, uri: Uri, content: Content): Collision =
     withContext(Dispatchers.IO) {

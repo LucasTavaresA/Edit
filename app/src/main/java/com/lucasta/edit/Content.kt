@@ -2,6 +2,7 @@ package com.lucasta.edit
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
@@ -20,10 +21,24 @@ internal const val PASS = 64 * 1024
  */
 private const val COMPACT_BYTES = 1 shl 20
 
-/** What a file was, closely enough to tell whether it is still the same one. */
+/**
+ * What a file was, closely enough to tell whether it is still the same one.
+ *
+ * [modified] is in nanoseconds. In whole seconds, a tool rewriting the file in place within the
+ * second it was stamped in, at the same size, would leave it looking untouched; what is left of that
+ * is the clock the filesystem stamps writes with, which ticks every few milliseconds. Before API 27
+ * there are only whole seconds to be had.
+ */
 data class Stamp(val device: Long, val inode: Long, val size: Long, val modified: Long) {
-    constructor(stat: StructStat) : this(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime)
+    constructor(stat: StructStat) : this(stat.st_dev, stat.st_ino, stat.st_size, stat.modified)
 }
+
+private val StructStat.modified: Long
+    get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+        st_mtim.tv_sec * 1_000_000_000 + st_mtim.tv_nsec
+    } else {
+        st_mtime * 1_000_000_000
+    }
 
 /**
  * The file as it was the instant it was opened, and the only thing a document ever reads it
