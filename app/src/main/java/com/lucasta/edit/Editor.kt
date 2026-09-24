@@ -88,12 +88,10 @@ private const val INDEX_OFF_THREAD = 256 * 1024
  * How long a stretch of typing may pause before what comes next is a change of its own.
  *
  * Every keystroke is recorded, so this decides only how many of them one press of undo walks back,
- * which is a question about what feels like one edit rather than about what the document knows. It
- * is the interval a text field's own history breaks on, because that is the behaviour being matched:
- * an undo asked for from the keyboard used to be answered by the field and now is not, and it should
- * still take back about as much.
+ * which is a question about what feels like one edit rather than about what the document knows. The
+ * pause is measured from the last keystroke and not from the start of the run.
  */
-private const val PAUSE_MILLIS = 5_000L
+private const val PAUSE_MILLIS = 1_000L
 
 /** Blank space under the last line, so the end of a file is not stuck against the bottom edge. */
 private val TAIL = 160.dp
