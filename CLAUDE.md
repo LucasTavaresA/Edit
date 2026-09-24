@@ -21,3 +21,5 @@ No implementations. PROGRESS carries ideas, concepts and findings — the things
 Two exceptions, both narrow. A genuinely hard problem, where the difficulty is in the solution and losing it means paying for it twice. And an explicit model we thought through and decided together — those are decisions, not suggestions, and they are binding until changed.
 
 Everything else is a concept: what the constraint is, what it costs, what it rules out. Not the line of code that answers it.
+
+PROGRESS says what things are supposed to be and what is left to do. Nothing about what was tried, tested or dropped, and no detailed technical info that can go stale.
