@@ -4,17 +4,21 @@ import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import android.view.Choreographer
+import java.io.ByteArrayOutputStream
+import java.io.FileDescriptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
  * What a file may be and still be opened. Nothing about the editor holds a plain file in memory any
- * more — the document is the file where it lies plus the changes made to it — so this is no longer
- * a memory limit at all. What is left is patience: opening indexes the file for chunk boundaries at
- * roughly the speed it can be read, and everything is addressed with an `Int`, which is the real
- * ceiling at 2 GB. This sits below both, and moving it is one constant.
+ * more — the document is a copy of the file on disk plus the changes made to it — so this is no
+ * longer a memory limit at all. What is left is patience: opening copies the file and indexes it for
+ * chunk boundaries, each at roughly the speed it can be read, and everything is addressed with an
+ * `Int`, which is the real ceiling at 2 GB. This sits below both, and moving it is one constant.
  */
 const val MAX_FILE_BYTES = Int.MAX_VALUE.toLong()
 
@@ -77,42 +81,47 @@ class NotSupported(message: String) : Exception(message)
 class TooBig(message: String) : Exception(message)
 
 /**
- * A file whose bytes only arrive in order, which is the one thing this document model cannot work
- * with: a piece of the document is a range of the file, read when it is looked at. Every provider
- * backed by a real file on the phone hands over a descriptor we can read out of order, which is
- * every file this app exists for.
+ * A file whose bytes only arrive in order, as a stream. Every provider backed by a real file on the
+ * phone hands over the file itself, which is every file this app exists for; a stream has no size
+ * to copy it by, and nothing a save could write back into.
  */
 class NotSeekable(message: String) : Exception(message)
 
 /**
- * Opens [uri] as a document: a descriptor held open on the file as it stands this instant, plus the
- * changes about to be made to it. The descriptor is the snapshot — see [Snapshot] — so nothing is
- * copied and nothing is held in memory that is proportional to the file.
+ * Opens [uri] as a document: a copy of the file as it stands this instant — see [Snapshot] — plus
+ * the changes about to be made to it.
  */
 suspend fun openDocument(context: Context, uri: Uri): Result<Content> = withContext(Dispatchers.IO) {
     runCatching {
-        val file = Snapshot.open(context, uri)
-        var adopted = false
-        try {
-            val head = file.head(HEAD_BYTES)
+        val file = context.contentResolver.openFileDescriptor(uri, "r")
+            ?: throw NotSeekable("nothing behind it to read")
+        file.use {
+            val stat = Os.fstat(it.fileDescriptor)
+            if (!OsConstants.S_ISREG(stat.st_mode)) throw NotSeekable("it arrives as a stream, not as a file")
+            val head = head(it.fileDescriptor, HEAD_BYTES)
             val format = if (looksEncrypted(head)) Format.Encrypted else Format.Plain
-            if (file.size > format.maxBytes) {
-                throw TooBig("${file.size.readable()}, over the ${format.maxBytes.readable()} limit")
+            if (stat.st_size > format.maxBytes) {
+                throw TooBig("${stat.st_size.readable()}, over the ${format.maxBytes.readable()} limit")
             }
             if (format == Format.Encrypted) {
                 readEncryptedDocument(context, uri).getOrThrow()
             } else {
-                readPlainDocument(file, head).also { adopted = true }
+                readPlainDocument(context, it.fileDescriptor, stat.st_size, head)
             }
-        } finally {
-            if (!adopted) file.close()
         }
     }
 }
 
+/** The first [count] bytes of the file behind [fd], or all of it if it is shorter. */
+private fun head(fd: FileDescriptor, count: Int): ByteArray {
+    val head = ByteArrayOutputStream()
+    passes(fd, count.toLong()) { pass, read -> head.write(pass, 0, read) }
+    return head.toByteArray()
+}
+
 /**
  * Writes [content] over [uri] and answers [Collision.None], or answers what it found instead. Unless
- * [anyway], the file has to still be exactly the one the document was last in step with.
+ * [anyway], the file has to still hold what the document was last in step with.
  */
 suspend fun saveDocument(context: Context, uri: Uri, content: Content, anyway: Boolean): Result<Collision> =
     when (content.format) {
@@ -120,46 +129,19 @@ suspend fun saveDocument(context: Context, uri: Uri, content: Content, anyway: B
         Format.Encrypted -> writeEncryptedDocument(context, uri, content, anyway)
     }
 
-/** What stands between the document and the file it was opened on. */
+/** What a save found in the file it was to write over. */
 enum class Collision {
-    /** The file is where we left it, byte for byte. Answered by a save, it now holds the document. */
+    /** Nothing in the way: the file now holds the document. */
     None,
 
     /**
-     * Something replaced the file since it was opened — sync brought a newer version. Our own copy
-     * is intact, because the descriptor pinned what it was opened on, so the only question is whose
-     * version the file ends up holding, and that is the user's to answer.
-     *
-     * A save answers it too when the file changed under it while it was writing, and then the
-     * document is exactly what it wrote: nothing is missing from it, only from the file.
+     * Something else wrote the file since the document was last in step with it — sync brought a
+     * newer version, or another app wrote into it, before the save or while it ran. The document is
+     * still exactly what was to be saved, so the only question is whose version the file ends up
+     * holding, and that is the user's to answer.
      */
-    Replaced,
-
-    /**
-     * Something rewrote the same file in place while we were reading it, which is the one case a
-     * descriptor cannot cover: the bytes we have not read yet are already somebody else's. Saving
-     * would write a document that is half old and half new.
-     */
-    Rewritten,
+    Changed,
 }
-
-/**
- * Whether [uri] is still the file [content] was opened on. Costs one open and one `fstat` — where a
- * hash would cost a full read of the file to learn the same thing, and could still only ever say
- * that bytes are gone, never bring them back.
- *
- * A save asks the same again once the descriptor it writes with is open, and that is the answer that
- * counts. This one is so the question comes before seconds of writing a temporary rather than after.
- */
-suspend fun collision(context: Context, uri: Uri, content: Content): Collision =
-    withContext(Dispatchers.IO) {
-        when {
-            content.rewritten() -> Collision.Rewritten
-            content.stamp == null -> Collision.Replaced
-            content.stamp != Snapshot.stamp(context, uri) -> Collision.Replaced
-            else -> Collision.None
-        }
-    }
 
 internal fun ByteArray.startsWith(prefix: ByteArray): Boolean =
     size >= prefix.size && prefix.indices.all { this[it] == prefix[it] }

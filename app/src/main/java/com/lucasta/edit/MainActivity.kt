@@ -205,12 +205,11 @@ private class Notice(val text: String, val hold: Hold) {
 }
 
 /**
- * Opening a file, New and saving take turns: one at a time, in the order they were asked for. A
- * save writes in place into the very file the document's descriptor is open on, so a second save
- * running alongside it reads that file half rewritten and writes what it read over it — or finds
- * it changing and reports our own save as somebody else's. Opening a file or New closes the
- * descriptor a save is reading through. Nothing is refused and no button goes off while one of
- * them runs: whatever is asked for meanwhile waits for it.
+ * Opening a file, New and saving take turns: one at a time, in the order they were asked for. Two
+ * saves at once would write the same file at once, and each would find the other's write there and
+ * ask about it as somebody else's. Opening a file or New lets go of the copy a save is reading the
+ * document from. Nothing is refused and no button goes off while one of them runs: whatever is
+ * asked for meanwhile waits for it.
  *
  * The turns are the process's rather than one screen's. Another app handing a file over can start a
  * second copy of Edit beside the first, and both run here, so taking turns across the two is what
@@ -218,10 +217,6 @@ private class Notice(val text: String, val hold: Hold) {
  * writing.
  */
 private val turns = Mutex()
-
-/** Why a document whose file was rewritten in place under it is not saved. */
-private fun rewritten(name: String) =
-    "$name was rewritten while it was open, so this document is no longer all of it"
 
 @Composable
 private fun Editor(opened: Uri? = null) {
@@ -241,14 +236,8 @@ private fun Editor(opened: Uri? = null) {
      */
     var saveWaiting by remember { mutableStateOf(false) }
 
-    /**
-     * The document's [DocumentState.version] when [file] last held exactly what it holds: just
-     * opened, or just saved. A save that finds nothing changed since has nothing to write.
-     */
-    var inStep by remember { mutableIntStateOf(-1) }
-
-    // The document holds a descriptor open on the file it was opened on, for as long as it is the
-    // open document. Nothing else is holding it, so this is where it is let go.
+    // The document holds its copy of the file open for as long as it is the open document. Nothing
+    // else is holding it, so this is where it is let go.
     DisposableEffect(document) { onDispose { document.close() } }
 
     /**
@@ -281,9 +270,8 @@ private fun Editor(opened: Uri? = null) {
 
     suspend fun load(uri: Uri) {
         heap("before")
-        // Opening no longer reads the file, but it does index it for chunk boundaries, and that is
-        // a pass over the whole thing: seconds for a file of a gigabyte. Say so rather than look
-        // like nothing happened.
+        // Opening copies the file and indexes it for chunk boundaries, two passes over the whole
+        // thing: seconds for a file of a gigabyte. Say so rather than look like nothing happened.
         say("opening ${displayName(context, uri)}")
         timed("open") {
             openDocument(context, uri)
@@ -292,7 +280,6 @@ private fun Editor(opened: Uri? = null) {
                     frameAfterNext("layout")
                     heap("after")
                     file = uri
-                    inStep = document.version
                     name = displayName(context, uri)
                     say(name, Hold.Briefly)
                 }
@@ -301,8 +288,8 @@ private fun Editor(opened: Uri? = null) {
     }
 
     /**
-     * Writes the document into [target]. Unless [anyway], only into the file it was last in step
-     * with, exactly as it was left — see [saveDocument].
+     * Writes the document into [target]. Unless [anyway], only while the file still holds what
+     * the document was last in step with — see [saveDocument].
      */
     suspend fun write(target: Uri, anyway: Boolean) {
         say("saving ${displayName(context, target)}")
@@ -311,22 +298,19 @@ private fun Editor(opened: Uri? = null) {
                 when (found) {
                     Collision.None -> {
                         file = target
-                        // Nothing can move the version while a write runs, so this is the one it wrote.
-                        inStep = document.version
                         name = displayName(context, target)
                         say("saved $name", Hold.Briefly)
                     }
-                    // The file holds something other than the document, found before anything was
-                    // written or arriving while it was. The document is still what was to be saved,
-                    // so the question is whose version the file keeps — and after Save as, the file
-                    // in question is the one it was saved as.
-                    Collision.Replaced -> {
+                    // Something else wrote the file, found before anything was written or arriving
+                    // while it was. The document is still what was to be saved, so the question is
+                    // whose version the file keeps — and after Save as, the file in question is the
+                    // one it was saved as.
+                    Collision.Changed -> {
                         file = target
                         name = displayName(context, target)
                         say(name)
                         asking = true
                     }
-                    Collision.Rewritten -> say(rewritten(name), Hold.UntilSeen)
                 }
             }
             .onFailure { say("could not save: ${it.message}", Hold.UntilSeen) }
@@ -360,30 +344,21 @@ private fun Editor(opened: Uri? = null) {
     }
 
     /**
-     * Saving asks first if the file is no longer the one that was opened. The document itself is
-     * fine either way — the descriptor kept it — so the only question is whose version the file
-     * ends up holding, and that is the user's to answer and not ours.
+     * Saving asks before writing over a file that something else has written since it was opened
+     * or last saved. The document itself is fine either way — it reads its own copy — so the only
+     * question is whose version the file ends up holding, and that is the user's to answer and not
+     * ours.
      *
-     * The check and the write are one operation, so the check can never be looking at a file that
-     * one of our own saves is halfway through rewriting. Which file, and what goes into it, are
-     * both taken when the save's turn comes rather than when Save was pressed: a file opened in
-     * between is the document by then, and writing it into the file it replaced would be worse
-     * than saving nothing. The write checks again as it writes, and asks the same question if the
-     * answer has changed by then.
+     * Which file, and what goes into it, are both taken when the save's turn comes rather than when
+     * Save was pressed: a file opened in between is the document by then, and writing it into the
+     * file it replaced would be worse than saving nothing.
      */
     fun save() {
         if (saveWaiting) return
         saveWaiting = true
         inTurn {
             saveWaiting = false
-            val target = file ?: return@inTurn
-            when (collision(context, target, document.content)) {
-                Collision.None ->
-                    if (document.unchangedSince(inStep)) say("saved $name", Hold.Briefly)
-                    else write(target, anyway = false)
-                Collision.Replaced -> asking = true
-                Collision.Rewritten -> say(rewritten(name), Hold.UntilSeen)
-            }
+            file?.let { write(it, anyway = false) }
         }
     }
 

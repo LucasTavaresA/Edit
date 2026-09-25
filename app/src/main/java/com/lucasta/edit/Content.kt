@@ -1,15 +1,15 @@
 package com.lucasta.edit
 
 import android.content.Context
-import android.net.Uri
-import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.Os
-import android.system.OsConstants
-import android.system.StructStat
 import java.io.Closeable
 import java.io.File
+import java.io.FileDescriptor
+import java.io.FileOutputStream
 import java.io.OutputStream
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 
 /** Bytes moved per pass whenever the whole document has to go somewhere. */
 internal const val PASS = 64 * 1024
@@ -22,88 +22,44 @@ internal const val PASS = 64 * 1024
 private const val COMPACT_BYTES = 1 shl 20
 
 /**
- * What a file was, closely enough to tell whether it is still the same one.
+ * A private copy of a file, and the only thing a document ever reads a file's bytes through.
  *
- * [modified] is in nanoseconds. In whole seconds, a tool rewriting the file in place within the
- * second it was stamped in, at the same size, would leave it looking untouched; what is left of that
- * is the clock the filesystem stamps writes with, which ticks every few milliseconds. Before API 27
- * there are only whole seconds to be had.
- */
-data class Stamp(val device: Long, val inode: Long, val size: Long, val modified: Long) {
-    constructor(stat: StructStat) : this(stat.st_dev, stat.st_ino, stat.st_size, stat.modified)
-}
-
-private val StructStat.modified: Long
-    get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-        st_mtim.tv_sec * 1_000_000_000 + st_mtim.tv_nsec
-    } else {
-        st_mtime * 1_000_000_000
-    }
-
-/**
- * The file as it was the instant it was opened, and the only thing a document ever reads it
- * through.
- *
- * A descriptor pins the file it was opened on and not the name. A tool that replaces the file —
- * writing a temporary and renaming over it, which is what Syncthing and rclone do — leaves what we
- * are reading alive and intact until we close it, whatever the name now points at. That is a real
- * snapshot for the price of one open descriptor, and it is what lets the document be the file plus
- * a list of changes instead of a copy of the file in memory. The bytes stay on disk rather than in
- * the heap, so it costs the space of the replaced file until the document is closed.
- *
- * The one case it cannot cover is a tool that rewrites the same file in place, which changes the
- * bytes under us. [rewritten] catches that by reading size and modification time back off our own
- * descriptor, for nothing.
+ * It lives in the app's own storage, unlinked from the moment it is open, so nothing but the
+ * descriptor held on it can reach it: no tool writing the file itself — appending, rewriting it in
+ * place or replacing it — can change the document under us. It costs the file's size in storage for
+ * as long as the document holds it.
  */
 class Snapshot private constructor(
     private val descriptor: ParcelFileDescriptor,
-    private val opened: Stamp,
+    val size: Long,
+    /** What it holds hashes to. */
+    val hash: ByteArray,
 ) : Closeable {
-
-    val size: Long get() = opened.size
-
-    val stamp: Stamp get() = opened
 
     companion object {
 
-        fun open(context: Context, uri: Uri): Snapshot {
-            val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
-                ?: throw NotSeekable("nothing behind it to read")
-            return adopt(descriptor)
-        }
-
-        fun open(file: File): Snapshot =
-            adopt(ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY))
-
-        /** What [uri] points at right now, or null if it cannot be opened at all any more. */
-        fun stamp(context: Context, uri: Uri): Stamp? = runCatching {
-            context.contentResolver.openFileDescriptor(uri, "r")
-                ?.use { Stamp(Os.fstat(it.fileDescriptor)) }
-        }.getOrNull()
-
-        private fun adopt(descriptor: ParcelFileDescriptor): Snapshot {
-            val stat = try {
-                Os.fstat(descriptor.fileDescriptor)
-            } catch (e: Exception) {
-                descriptor.close()
-                throw NotSeekable("it cannot be looked at as a file")
+        /** A snapshot of whatever [fill] writes into it. */
+        fun write(context: Context, fill: (OutputStream) -> Unit): Snapshot {
+            val file = File.createTempFile("snapshot", null, context.cacheDir)
+            // Unlinked before anything goes into it, so a copy the process dies halfway through
+            // leaves nothing behind. The stream is not closed: the descriptor is the snapshot's.
+            val descriptor = try {
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE)
+            } finally {
+                file.delete()
             }
-            // A pipe or a socket is a provider streaming its content rather than a file on the
-            // phone. Refused here rather than half way through, because a document reads the parts
-            // of a file nobody has edited straight out of it, in whatever order they are looked at.
-            if (!OsConstants.S_ISREG(stat.st_mode)) {
+            try {
+                val digest = digest()
+                fill(DigestOutputStream(FileOutputStream(descriptor.fileDescriptor), digest))
+                return Snapshot(descriptor, Os.fstat(descriptor.fileDescriptor).st_size, digest.digest())
+            } catch (e: Throwable) {
                 descriptor.close()
-                throw NotSeekable("it arrives as a stream, not as a file")
+                throw e
             }
-            return Snapshot(descriptor, Stamp(stat))
         }
     }
 
-    /**
-     * [length] bytes from [at]. A read that comes up short means the file has been truncated under
-     * us, which is the in-place rewrite [rewritten] reports; the rest is left zeroed rather than
-     * failing, so that scrolling over the hole shows something and saving is what refuses.
-     */
+    /** [length] bytes from [at]. */
     fun read(at: Long, into: ByteArray, offset: Int, length: Int) {
         var done = 0
         while (done < length) {
@@ -113,28 +69,49 @@ class Snapshot private constructor(
         }
     }
 
-    /** The first [count] bytes, or the whole file if it is shorter. */
-    fun head(count: Int): ByteArray {
-        val bytes = ByteArray(minOf(count.toLong(), size).toInt())
-        read(0, bytes, 0, bytes.size)
-        return bytes
+    /** All of it, written into the file behind [out] from wherever that stands. */
+    fun writeTo(out: FileDescriptor) = passes(descriptor.fileDescriptor, size) { pass, count ->
+        var done = 0
+        while (done < count) done += Os.write(out, pass, done, count - done)
     }
-
-    /** Whether the file we are reading has been rewritten in place since it was opened. */
-    fun rewritten(): Boolean = runCatching {
-        val now = Stamp(Os.fstat(descriptor.fileDescriptor))
-        now.size != opened.size || now.modified != opened.modified
-    }.getOrDefault(true)
 
     override fun close() = descriptor.close()
 }
 
 /**
- * A document: the file where it lies, plus the changes made to it.
+ * Hands [block] the file behind [fd] a pass at a time, from its start to its end or to [limit],
+ * whichever comes first. It reads by position, so the descriptor's offset stays where it was.
+ */
+internal inline fun passes(fd: FileDescriptor, limit: Long = Long.MAX_VALUE, block: (ByteArray, Int) -> Unit) {
+    val pass = ByteArray(PASS)
+    var at = 0L
+    while (at < limit) {
+        val count = Os.pread(fd, pass, 0, minOf(PASS.toLong(), limit - at).toInt(), at)
+        if (count <= 0) break
+        block(pass, count)
+        at += count
+    }
+}
+
+/**
+ * What the whole of the file behind [fd] hashes to. Two files hash the same only if they hold the
+ * same bytes, which is how a save tells whether anything else has written its file: whatever was
+ * written and however, while nothing that leaves the bytes as they were — a new time on the file, or
+ * the same contents put back — counts as a change.
+ */
+internal fun hash(fd: FileDescriptor): ByteArray {
+    val digest = digest()
+    passes(fd) { pass, count -> digest.update(pass, 0, count) }
+    return digest.digest()
+}
+
+private fun digest(): MessageDigest = MessageDigest.getInstance("SHA-256")
+
+/**
+ * A document: a [Snapshot] of the file, plus the changes made to it.
  *
- * It behaves as a whole copy of the file taken the instant it was opened. What a save writes is
- * that copy with our edits in it and not one byte from anywhere else — never something another tool
- * put there in the meantime. The change list is only how a copy that large is afforded.
+ * What a save writes is that copy with our edits in it and not one byte from anywhere else — never
+ * something another tool put there in the meantime.
  *
  * Coordinates are bytes, on both sides. A piece is a byte range whichever it points at, so a range
  * nobody edited is copied to the output exactly as it came in and only the parts that were touched
@@ -159,9 +136,11 @@ class Content private constructor(
 
     private var compactAt = COMPACT_BYTES
 
-    /** The file this document was last in step with, or null if it has never been in step with one. */
-    var stamp: Stamp? = file?.stamp
-        private set
+    /**
+     * What this document's snapshot hashes to, or null if it has none. A save writes over its file
+     * without asking only while the file still hashes the same.
+     */
+    val hash: ByteArray? get() = file?.hash
 
     val length: Int get() = pieces.length
 
@@ -188,9 +167,6 @@ class Content private constructor(
         fun empty(encoding: Encoding = Encoding.Utf8, format: Format = Format.Plain): Content =
             of(ByteArray(0), encoding, format)
     }
-
-    /** Whether the file underneath has been rewritten in place since it was opened. */
-    fun rewritten(): Boolean = file?.rewritten() ?: false
 
     override fun read(from: Int, to: Int): ByteArray {
         val out = ByteArray((to - from).coerceAtLeast(0))
@@ -275,14 +251,13 @@ class Content private constructor(
     }
 
     /**
-     * Starts again from a file that already holds exactly this document, which is what a save has
-     * just made true. The change list collapses back to one piece and the typed buffer is let go,
-     * so a long session does not accumulate.
+     * Starts again from a snapshot that holds exactly this document, which is what a save has just
+     * written. The change list collapses back to one piece and the typed buffer is let go, so a long
+     * session does not accumulate.
      */
-    fun rebase(file: Snapshot, stamp: Stamp?) {
+    fun rebase(file: Snapshot) {
         this.file?.close()
         this.file = file
-        this.stamp = stamp
         pieces.reset(Piece(encoding.bom.size, length, typed = false))
         typed = ByteArray(0)
         typedLength = 0

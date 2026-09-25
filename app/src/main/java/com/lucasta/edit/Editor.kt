@@ -99,7 +99,7 @@ private val TAIL = 160.dp
 /**
  * The document, plus the slice of it that is currently editable.
  *
- * The document is a [Content]: the file where it lies plus the changes made to it, addressed in
+ * The document is a [Content]: a copy of the file plus the changes made to it, addressed in
  * bytes. Nothing here holds the text of the file — a row is decoded when it is drawn and thrown
  * away when it scrolls off, and what is in memory measures the editing rather than the file.
  *
@@ -297,20 +297,11 @@ class DocumentState : Closeable {
             write(content)
         } finally {
             writing = false
-            // A save ends the history — the document starts again from the file it has just
-            // written — so what the buttons say about it has to be asked again.
+            // A save ends the history — the document starts again from what it has just written —
+            // so what the buttons say about it has to be asked again.
             track()
         }
     }
-
-    /**
-     * Whether the document is still what it was at [version], counting whatever the window holds
-     * that has not been recorded yet — typing that arrived while a write was running included.
-     * Moving the window moves [version] too, so a document nobody changed can be answered no, and
-     * one somebody did is never answered yes.
-     */
-    fun unchangedSince(version: Int): Boolean =
-        version == this.version && !behind && (windowStart < 0 || change(windowSlice.text, window.text) == null)
 
     /** Puts the cursor at [offset], moving the window there. Both offsets are the document's bytes. */
     suspend fun focus(offset: Int, selection: TextRange? = null) {
