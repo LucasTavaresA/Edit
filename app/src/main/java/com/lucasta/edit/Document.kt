@@ -120,13 +120,13 @@ private fun head(fd: FileDescriptor, count: Int): ByteArray {
 }
 
 /**
- * Writes [content] over [uri] and answers [Collision.None], or answers what it found instead. Unless
+ * Writes [take] over [uri] and answers [Collision.None], or answers what it found instead. Unless
  * [anyway], the file has to still hold what the document was last in step with.
  */
-suspend fun saveDocument(context: Context, uri: Uri, content: Content, anyway: Boolean): Result<Collision> =
-    when (content.format) {
-        Format.Plain -> writePlainDocument(context, uri, content, anyway)
-        Format.Encrypted -> writeEncryptedDocument(context, uri, content, anyway)
+suspend fun saveDocument(context: Context, uri: Uri, take: Take, anyway: Boolean): Result<Collision> =
+    when (take.format) {
+        Format.Plain -> writePlainDocument(context, uri, take, anyway)
+        Format.Encrypted -> writeEncryptedDocument(context, uri, take, anyway)
     }
 
 /** What a save found in the file it was to write over. */

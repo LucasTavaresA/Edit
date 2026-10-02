@@ -3,6 +3,7 @@ package com.lucasta.edit
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.system.Os
+import java.io.BufferedOutputStream
 import java.io.Closeable
 import java.io.File
 import java.io.FileDescriptor
@@ -10,9 +11,6 @@ import java.io.FileOutputStream
 import java.io.OutputStream
 import java.security.DigestOutputStream
 import java.security.MessageDigest
-
-/** Bytes moved per pass whenever the whole document has to go somewhere. */
-internal const val PASS = 64 * 1024
 
 /**
  * How large the buffer holding what was typed has to get before it is worth looking for parts of it
@@ -28,6 +26,10 @@ private const val COMPACT_BYTES = 1 shl 20
  * descriptor held on it can reach it: no tool writing the file itself — appending, rewriting it in
  * place or replacing it — can change the document under us. It costs the file's size in storage for
  * as long as the document holds it.
+ *
+ * It stays open for as long as anything holds it — the document, and any save still writing from
+ * it — and the last of them to let go closes it. Back can close the screen and the document with it
+ * in the middle of a save, and a save that has started is never cut short.
  */
 class Snapshot private constructor(
     private val descriptor: ParcelFileDescriptor,
@@ -35,6 +37,8 @@ class Snapshot private constructor(
     /** What it holds hashes to. */
     val hash: ByteArray,
 ) : Closeable {
+
+    private var holders = 1
 
     companion object {
 
@@ -69,13 +73,15 @@ class Snapshot private constructor(
         }
     }
 
-    /** All of it, written into the file behind [out] from wherever that stands. */
-    fun writeTo(out: FileDescriptor) = passes(descriptor.fileDescriptor, size) { pass, count ->
-        var done = 0
-        while (done < count) done += Os.write(out, pass, done, count - done)
+    /** Keeps it open for one more holder, who lets go with [close]. */
+    fun hold(): Snapshot = synchronized(this) {
+        holders++
+        this
     }
 
-    override fun close() = descriptor.close()
+    override fun close() {
+        if (synchronized(this) { --holders == 0 }) descriptor.close()
+    }
 }
 
 /**
@@ -120,27 +126,44 @@ private fun digest(): MessageDigest = MessageDigest.getInstance("SHA-256")
  * everything looking for a line break has to look in code units and not in bytes, since in UTF-16 a
  * byte 0x0A is only sometimes a line break.
  *
+ * It keeps the copy and the typed buffer for as long as it is open, and no save moves it onto
+ * another. Every state it has been in since it opened is made of those two, so the history, which
+ * points into them and never into the file, reaches all of them, and nothing done to the file —
+ * saving it, Save as, another app writing it — can reach the history.
+ *
  * A document with no file behind it — a new one, or a decrypted one — is the same thing with every
  * piece pointing at the typed buffer. There is nothing else to be: the encrypted path holds its
- * plaintext whole, in memory, and puts no piece of it into a file anywhere.
+ * plaintext whole, in memory, and puts no piece of it into a file anywhere, which is why its typed
+ * buffer is the one that never moves onto disk.
  */
 class Content private constructor(
-    private var file: Snapshot?,
+    private val file: Snapshot?,
     val encoding: Encoding,
     val format: Format,
-    private var typed: ByteArray,
-    private var typedLength: Int,
+    private var typed: Typed,
+    start: Piece?,
 ) : Bytes, Closeable {
 
-    private val pieces = Pieces()
+    private val pieces = Pieces(start)
 
     private var compactAt = COMPACT_BYTES
 
     /**
-     * What this document's snapshot hashes to, or null if it has none. A save writes over its file
-     * without asking only while the file still hashes the same.
+     * Where the file was last in step with the document — opened, or saved — as a place on the line
+     * of changes, and what the file held then. A save moves it, undo and redo do not, and neither
+     * touches the other.
      */
-    val hash: ByteArray? get() = file?.hash
+    private var base = pieces.place
+
+    private var baseHash: ByteArray? = file?.hash
+
+    private var closed = false
+
+    /**
+     * Whether the document has edits the file does not hold, which is exactly that it stands
+     * somewhere on the line other than the base: undoing back to what was saved is saved.
+     */
+    val unsaved: Boolean get() = pieces.place != base
 
     val length: Int get() = pieces.length
 
@@ -149,23 +172,25 @@ class Content private constructor(
         /**
          * The whole of [file] as one piece. The document starts after the byte order mark, which
          * belongs to the file rather than to the text in it and is written back on the way out.
+         * [spill] is where its typed buffer goes once it is too large for memory.
          */
-        fun of(file: Snapshot, encoding: Encoding, format: Format = Format.Plain): Content {
+        fun of(file: Snapshot, encoding: Encoding, spill: File?, format: Format = Format.Plain): Content {
             val from = encoding.bom.size
             val length = (file.size - from).coerceAtLeast(0).toInt()
-            return Content(file, encoding, format, ByteArray(0), 0).apply {
-                pieces.reset(Piece(from, length, typed = false))
-            }
+            return Content(file, encoding, format, typed(format, spill), Piece(from, length, typed = false))
         }
 
         /** A document that is only what is in memory: a new one, or a decrypted one. */
-        fun of(bytes: ByteArray, encoding: Encoding, format: Format = Format.Plain): Content =
-            Content(null, encoding, format, bytes, bytes.size).apply {
-                pieces.reset(Piece(0, bytes.size, typed = true))
-            }
+        fun of(bytes: ByteArray, encoding: Encoding, format: Format = Format.Plain, spill: File? = null): Content {
+            val typed = typed(format, spill)
+            return Content(null, encoding, format, typed, Piece(typed.append(bytes), bytes.size, typed = true))
+        }
 
-        fun empty(encoding: Encoding = Encoding.Utf8, format: Format = Format.Plain): Content =
-            of(ByteArray(0), encoding, format)
+        fun empty(spill: File? = null, encoding: Encoding = Encoding.Utf8, format: Format = Format.Plain): Content =
+            of(ByteArray(0), encoding, format, spill)
+
+        /** A typed buffer that may move onto disk only if the document is plain, wherever it is asked. */
+        private fun typed(format: Format, spill: File?) = Typed(if (format == Format.Plain) spill else null)
     }
 
     override fun read(from: Int, to: Int): ByteArray {
@@ -173,7 +198,7 @@ class Content private constructor(
         if (out.isEmpty()) return out
         var filled = 0
         pieces.forEach(from, to) { typedPiece, at, count ->
-            if (typedPiece) System.arraycopy(typed, at, out, filled, count)
+            if (typedPiece) typed.read(at, out, filled, count)
             else file?.read(at.toLong(), out, filled, count)
             filled += count
         }
@@ -192,7 +217,8 @@ class Content private constructor(
      * press of undo walks back. Every change is recorded either way.
      */
     fun replace(from: Int, to: Int, bytes: ByteArray, continues: Boolean = false): Int {
-        val delta = pieces.replace(from, to, listOfNotNull(append(bytes)), continues)
+        val added = if (bytes.isEmpty()) null else Piece(typed.append(bytes), bytes.size, typed = true)
+        val delta = pieces.replace(from, to, listOfNotNull(added), continues)
         settle()
         return delta
     }
@@ -202,70 +228,123 @@ class Content private constructor(
     val canRedo: Boolean get() = pieces.canRedo
 
     /** Walks the last run of changes back, and says what it covered, or null when there is none. */
-    fun undo(): Span? = pieces.undo()
+    fun undo(): Span? = pieces.undo().also { settle() }
 
-    fun redo(): Span? = pieces.redo()
+    fun redo(): Span? = pieces.redo().also { settle() }
 
     /**
-     * Lets go of whatever the typed buffer is holding that no piece names any more, which is what a
-     * session of pasting and deleting leaves behind. Only ever looked for once the buffer is large
-     * enough for it to matter, and the next look is put off until it has doubled again, so a buffer
-     * that is all still in use is not copied over and over to learn that.
+     * Keeps the pieces under their limit, which walking a change back can take them over as well as
+     * making one can, and lets go of whatever the typed buffer is holding that no piece names any
+     * more, which is what a session of pasting and deleting leaves behind. That is only ever looked
+     * for once the buffer is large enough for it to matter, and the next look is put off until it
+     * has doubled again, so a buffer that is all still in use is not copied over and over to learn
+     * that.
      */
     private fun settle() {
-        if (typedLength < compactAt) return
-        typed = pieces.compact(typed)
-        typedLength = typed.size
-        compactAt = maxOf(COMPACT_BYTES, minOf(typedLength, Int.MAX_VALUE / 2) * 2)
+        pieces.collapse(::merged)
+        if (typed.length < compactAt) return
+        val kept = pieces.compact(typed)
+        // A save still writing from the old one holds its own view of it, so this lets go of it
+        // only as far as the document goes.
+        typed.close()
+        typed = kept
+        compactAt = maxOf(COMPACT_BYTES, minOf(typed.length, Int.MAX_VALUE / 2) * 2)
     }
 
-    private fun append(bytes: ByteArray): Piece? {
-        if (bytes.isEmpty()) return null
-        if (typedLength + bytes.size > typed.size) {
-            val room = maxOf(typedLength + bytes.size, maxOf(typed.size * 2, PASS))
-            typed = typed.copyOf(room)
+    /** The bytes [run] names, put on the end of the typed buffer as one piece. */
+    private fun merged(run: List<Piece>): Piece {
+        var total = 0
+        for (piece in run) total += piece.length
+        val bytes = ByteArray(total)
+        var filled = 0
+        for (piece in run) {
+            if (piece.typed) typed.read(piece.at, bytes, filled, piece.length)
+            else file?.read(piece.at.toLong(), bytes, filled, piece.length)
+            filled += piece.length
         }
-        System.arraycopy(bytes, 0, typed, typedLength, bytes.size)
-        val piece = Piece(typedLength, bytes.size, typed = true)
-        typedLength += bytes.size
-        return piece
-    }
-
-    /** The document as bytes, in order, byte order mark first. */
-    fun writeTo(out: OutputStream) {
-        out.write(encoding.bom)
-        val pass = ByteArray(PASS)
-        pieces.forEach(0, length) { typedPiece, at, length ->
-            if (typedPiece) {
-                out.write(typed, at, length)
-            } else {
-                var done = 0
-                while (done < length) {
-                    val count = minOf(PASS, length - done)
-                    file?.read((at + done).toLong(), pass, 0, count)
-                    out.write(pass, 0, count)
-                    done += count
-                }
-            }
-        }
+        return Piece(typed.append(bytes), total, typed = true)
     }
 
     /**
-     * Starts again from a snapshot that holds exactly this document, which is what a save has just
-     * written. The change list collapses back to one piece and the typed buffer is let go, so a long
-     * session does not accumulate.
+     * Everything a save writes, taken in one step with nothing that waits: the pieces, the typed
+     * buffer as far as it goes now, a hold on the private copy, the base's hash and the place the
+     * document stands on. What it takes stays readable until the save closes it, whatever is done
+     * to the document meanwhile.
      */
-    fun rebase(file: Snapshot) {
-        this.file?.close()
-        this.file = file
-        pieces.reset(Piece(encoding.bom.size, length, typed = false))
-        typed = ByteArray(0)
-        typedLength = 0
-        compactAt = COMPACT_BYTES
+    fun take(): Take = Take(
+        encoding, format, pieces.toArray(), file?.hold(), typed.view(), baseHash, pieces.place, !unsaved,
+    )
+
+    /**
+     * The file holds [take] now, read back and confirmed: the base moves to where the document stood
+     * when it was taken. Nothing else changes — no piece, nothing in the history, no copy — so
+     * whatever was typed while the save ran is unsaved after it.
+     */
+    fun saved(take: Take) {
+        base = take.place
+        baseHash = take.hash
     }
 
     override fun close() {
+        if (closed) return
+        closed = true
         file?.close()
-        file = null
+        typed.close()
+    }
+}
+
+/**
+ * The document as a save takes it: the pieces as they stood, the typed buffer as far as it went, a
+ * hold on the private copy, and where the base and the document stood. Taken on the main thread and
+ * written from on another, and nothing done to the document meanwhile can reach it — the pieces are
+ * a copy, the typed buffer is only ever written past where it went, and the private copy never
+ * changes and stays open until the save lets go of it, whether or not the document has let go first.
+ */
+class Take internal constructor(
+    private val encoding: Encoding,
+    val format: Format,
+    private val pieces: Array<Piece>,
+    private val file: Snapshot?,
+    private val typed: Typed.View,
+    /** What the file held when it was last in step with the document, or null if it never was. */
+    val base: ByteArray?,
+    internal val place: Long,
+    /** Whether this is exactly what the file held then, with nothing changed since. */
+    val clean: Boolean,
+) : Closeable {
+
+    /** What this hashes to, once that is known: the base's when [clean], and otherwise once it is written. */
+    var hash: ByteArray? = if (clean) base else null
+        private set
+
+    private var closed = false
+
+    /** Writes the whole of it into [out], byte order mark first, and learns its [hash] on the way. */
+    fun writeTo(out: OutputStream) {
+        val digest = digest()
+        // Buffered, because a piece of typing can be one byte and every write under it is a call into
+        // the file.
+        val sink = BufferedOutputStream(DigestOutputStream(out, digest), PASS)
+        sink.write(encoding.bom)
+        val pass = ByteArray(PASS)
+        for (piece in pieces) {
+            var done = 0
+            while (done < piece.length) {
+                val count = minOf(PASS, piece.length - done)
+                if (piece.typed) typed.read(piece.at + done, pass, 0, count)
+                else file?.read((piece.at + done).toLong(), pass, 0, count)
+                sink.write(pass, 0, count)
+                done += count
+            }
+        }
+        sink.flush()
+        hash = digest.digest()
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        file?.close()
+        typed.close()
     }
 }

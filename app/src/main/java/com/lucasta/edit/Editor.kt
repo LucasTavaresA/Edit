@@ -49,6 +49,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.dp
 import java.io.Closeable
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -116,11 +117,14 @@ private val TAIL = 160.dp
  *
  * Every offset in here is a byte offset into the document. The window's own are characters, because
  * that is what a text field deals in, and [Slice] is what crosses between the two.
+ *
+ * [spill] is where the document it starts with keeps its typed buffer once that is too large for
+ * memory.
  */
 @Stable
-class DocumentState : Closeable {
+class DocumentState(spill: File?) : Closeable {
 
-    var content: Content by mutableStateOf(Content.empty())
+    var content: Content by mutableStateOf(Content.empty(spill))
         private set
 
     var chunks: IntArray by mutableStateOf(intArrayOf(0))
@@ -236,9 +240,6 @@ class DocumentState : Closeable {
      */
     private var focusFor = -1
 
-    /** Set while the document is being written out, when it must not be changed. */
-    private var writing = false
-
     /**
      * One chunk for the whole document, which is what encrypted files get: the window then covers
      * everything, every edit is an ordinary edit in one text field, and the layout is the whole
@@ -286,26 +287,31 @@ class DocumentState : Closeable {
     }
 
     /**
-     * Runs [write] against the document as it stands, window edits included. Nothing may change it
-     * while [write] runs: the window keeps taking keystrokes, but it cannot be committed or moved
-     * until the write is done.
+     * Saves the document as it stands, window edits included, through [write], and moves the base on
+     * once the file holds it.
+     *
+     * What [write] gets is taken here, on the main thread in one step with nothing that waits, so
+     * the keyboard's events queue behind it for well under a frame and none of them can land half
+     * way through it. [write] writes from that alone, off the main thread, while the document goes
+     * on being edited as ever. The base moves back here, still within the save's turn, since the
+     * next save's take reads what it sets.
      */
-    suspend fun <T> withContent(write: suspend (Content) -> T): T {
+    suspend fun save(write: suspend (Take) -> Result<Collision>): Result<Collision> {
+        // An edit made over a mark and not yet applied is applied first, or the take would have the
+        // field's few kilobytes stand in for the whole of the mark.
+        swallow()
         commit()
-        writing = true
+        val content = content
+        val take = content.take()
         return try {
-            write(content)
+            write(take).onSuccess { if (it == Collision.None) content.saved(take) }
         } finally {
-            writing = false
-            // A save ends the history — the document starts again from what it has just written —
-            // so what the buttons say about it has to be asked again.
-            track()
+            take.close()
         }
     }
 
     /** Puts the cursor at [offset], moving the window there. Both offsets are the document's bytes. */
     suspend fun focus(offset: Int, selection: TextRange? = null) {
-        if (writing) return
         val at = shifted(offset)
         val range = selection?.let { TextRange(shifted(it.start), shifted(it.end)) }
         marked = null
@@ -325,7 +331,6 @@ class DocumentState : Closeable {
      * a gigabyte as on a line.
      */
     suspend fun selectAll() {
-        if (writing) return
         marked = null
         // Before the emptiness test, not after: a document typed from new holds everything it has
         // in the field, and asking the document how long it is before that is written back answers
@@ -346,7 +351,6 @@ class DocumentState : Closeable {
     suspend fun redo() = step(back = false)
 
     private suspend fun step(back: Boolean) {
-        if (writing) return
         marked = null
         commit()
         val span = (if (back) content.undo() else content.redo()) ?: return
@@ -377,7 +381,7 @@ class DocumentState : Closeable {
      * fight the gesture.
      */
     suspend fun follow() {
-        if (writing || windowStart < 0) return
+        if (windowStart < 0) return
         if (swallow()) return
         // Before anything that suspends, so that what the field holds reaches the change list while
         // it is still what the field holds. This flow conflates, so keystrokes arriving faster than
@@ -389,7 +393,7 @@ class DocumentState : Closeable {
         // and both of the things below read it. Waiting for it also means that however fast input
         // arrives, this runs once a frame rather than once a keystroke.
         withFrameNanos { }
-        if (writing || windowStart < 0) return
+        if (windowStart < 0) return
         showCursor()
         val selection = window.selection
         if (!selection.collapsed || whole) return

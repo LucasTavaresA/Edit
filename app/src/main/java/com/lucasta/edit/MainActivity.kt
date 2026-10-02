@@ -207,9 +207,9 @@ private class Notice(val text: String, val hold: Hold) {
 /**
  * Opening a file, New and saving take turns: one at a time, in the order they were asked for. Two
  * saves at once would write the same file at once, and each would find the other's write there and
- * ask about it as somebody else's. Opening a file or New lets go of the copy a save is reading the
- * document from. Nothing is refused and no button goes off while one of them runs: whatever is
- * asked for meanwhile waits for it.
+ * ask about it as somebody else's. A save ends by moving the base the next save's take reads and by
+ * naming the file it wrote, which an open or New in between would have replaced. Nothing is refused
+ * and no button goes off while one of them runs: whatever is asked for meanwhile waits for it.
  *
  * The turns are the process's rather than one screen's. Another app handing a file over can start a
  * second copy of Edit beside the first, and both run here, so taking turns across the two is what
@@ -222,7 +222,7 @@ private val turns = Mutex()
 private fun Editor(opened: Uri? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val document = remember { DocumentState() }
+    val document = remember { DocumentState(context.cacheDir) }
     var file by remember { mutableStateOf<Uri?>(null) }
     var name by remember { mutableStateOf(UNTITLED) }
     var notice by remember { mutableStateOf(Notice(NO_FILE, Hold.Never)) }
@@ -236,8 +236,9 @@ private fun Editor(opened: Uri? = null) {
      */
     var saveWaiting by remember { mutableStateOf(false) }
 
-    // The document holds its copy of the file open for as long as it is the open document. Nothing
-    // else is holding it, so this is where it is let go.
+    // The document holds its copy of the file open for as long as it is the open document, so this
+    // is where it lets go. A save still writing from it holds it too, and whichever of the two lets
+    // go last closes it.
     DisposableEffect(document) { onDispose { document.close() } }
 
     /**
@@ -293,7 +294,7 @@ private fun Editor(opened: Uri? = null) {
      */
     suspend fun write(target: Uri, anyway: Boolean) {
         say("saving ${displayName(context, target)}")
-        document.withContent { saveDocument(context, target, it, anyway) }
+        document.save { saveDocument(context, target, it, anyway) }
             .onSuccess { found ->
                 when (found) {
                     Collision.None -> {
@@ -323,7 +324,7 @@ private fun Editor(opened: Uri? = null) {
      */
     fun new() {
         inTurn {
-            document.load(Content.empty())
+            document.load(Content.empty(context.cacheDir))
             document.focus(0)
             file = null
             name = UNTITLED

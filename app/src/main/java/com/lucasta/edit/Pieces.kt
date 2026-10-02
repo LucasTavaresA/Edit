@@ -6,22 +6,33 @@ class Piece(val at: Int, val length: Int, val typed: Boolean)
 /** What a change covered: the [was] bytes at [at] are the [now] bytes standing there instead. */
 class Span(val at: Int, val was: Int, val now: Int)
 
+/** What one remembered change costs, near enough: itself and the few pieces it took out. */
+private const val STEP_BYTES = 100
+
 /**
- * How many changes are kept to be walked back. A change costs the pieces it took out — three or
- * four objects and not one byte of text — so what this bounds is not the size of a change but the
- * one thing that would otherwise grow for as long as the app is open.
+ * How many changes are kept to be walked back: as many as an eighth of the heap holds. A change
+ * costs the pieces it took out — three or four objects and not one byte of text — so what this
+ * bounds is not the size of a change but the one thing that would otherwise grow for as long as the
+ * document is open. When it is full the oldest change falls off, which costs nothing.
  *
  * It is counted in keystrokes rather than in commits: every state the document passes through is
- * recorded as it happens, so a change is now one press of a key. A save collapses the document and
- * ends the history, so this only ever has to cover one stretch of editing between two saves.
+ * recorded as it happens, so a change is one press of a key. The history spans saves, so this has to
+ * cover everything since the document was opened, and a share of the heap rather than a number is
+ * what puts it out of reach on a phone with memory to spare and keeps it inside one without.
  */
-private const val STEPS = 16384
+private val STEPS = (Runtime.getRuntime().maxMemory() / 8 / STEP_BYTES).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+
+/**
+ * How many pieces the document may be cut into before the cheapest of them are copied into one —
+ * see [Pieces.collapse].
+ */
+private const val PIECES = 100_000
 
 /**
  * The document as a sequence of pieces, which is the whole of what an edit changes, and the changes
  * themselves. Nothing here touches a byte: typing rewrites the sequence and the bytes it names stay
- * where they already were, in the file or on the end of the typed buffer. Coordinates are the
- * document's own bytes.
+ * where they already were, in the private copy of the file or in the typed buffer. Coordinates are
+ * the document's own bytes. It starts as [start], the whole of what was opened, or as nothing.
  *
  * Undo lives here rather than above because it is the same fact from the other side. A splice knows
  * exactly which pieces it took out, and a piece names bytes that never move, so remembering a
@@ -29,21 +40,24 @@ private const val STEPS = 16384
  *
  * Every change is recorded, and how much one press of undo walks back is a separate question: a
  * change carries whether it belongs to the run of changes before it, and a walk takes a whole run.
+ * The changes are a line, and the document stands at one [place] on it.
  */
-class Pieces {
+class Pieces(start: Piece?, private val steps: Int = STEPS, private val most: Int = PIECES) {
 
     private val list = ArrayList<Piece>(8)
 
     /**
      * One change, as what it put in and what it took out, which is all that undoing one needs.
      * [continues] says it belongs to the run the change before it is in — a stretch of typing
-     * between two pauses — which is what one press of undo walks back.
+     * between two pauses — which is what one press of undo walks back. [name] says which change it
+     * is, and walking it back and forward again keeps it: see [place].
      */
     private class Step(
         val at: Int,
         val added: Int,
         val removed: MutableList<Piece>,
         val continues: Boolean,
+        val name: Long,
     )
 
     private val undos = ArrayDeque<Step>()
@@ -53,18 +67,33 @@ class Pieces {
     var length = 0
         private set
 
+    init {
+        if (start != null && start.length > 0) {
+            list.add(start)
+            length = start.length
+        }
+    }
+
+    /** The last name given to a change. None is given twice. */
+    private var named = 0L
+
+    /** Where the oldest change kept starts from: the last one to fall off the history, or the opening. */
+    private var origin = 0L
+
+    /**
+     * Where the document stands on the line of changes: the change that left it as it is, or where
+     * the oldest one kept starts from when there is nothing left to walk back. Every change moves
+     * it on, and undo and redo walk it back and forward along the line.
+     *
+     * A name and not a count. After an undo, new typing cuts the old way forward off, and a count
+     * would then come back to a number it has had before while the document is somewhere it has
+     * never been.
+     */
+    val place: Long get() = undos.lastOrNull()?.name ?: origin
+
     val canUndo: Boolean get() = undos.isNotEmpty()
 
     val canRedo: Boolean get() = redos.isNotEmpty()
-
-    /** Back to one piece, or to nothing, which is what opening and saving both leave behind. */
-    fun reset(piece: Piece?) {
-        list.clear()
-        undos.clear()
-        redos.clear()
-        length = if (piece != null && piece.length > 0) piece.length else 0
-        if (length > 0) list.add(piece!!)
-    }
 
     /**
      * Replaces what stands between [from] and [to] with [added], remembers the change, and answers
@@ -79,23 +108,24 @@ class Pieces {
         for (piece in added) if (piece.length > 0) count += piece.length
         val joins = continues && undos.isNotEmpty()
         val removed = splice(start, end, added)
-        undos.addLast(Step(start, count, removed, joins))
+        undos.addLast(Step(start, count, removed, joins, ++named))
         trim()
         redos.clear()
         return length - was
     }
 
     /**
-     * Drops the oldest changes past [STEPS], and never leaves half a run of them at the front: a
+     * Drops the oldest changes past [steps], and never leaves half a run of them at the front: a
      * run is what one press of undo walks, so one whose first change has gone would walk into
-     * nothing. Only the changes taken are ever trimmed — the ones waiting to be walked forward
-     * came out of that same deque and were cleared the moment anything else was typed, so the two
-     * together can never hold more than it did.
+     * nothing. The last change dropped is where the oldest one kept starts from, which is where the
+     * document stands once everything is walked back. Only the changes taken are ever trimmed — the
+     * ones waiting to be walked forward came out of that same deque and were cleared the moment
+     * anything else was typed, so the two together can never hold more than it did.
      */
     private fun trim() {
-        if (undos.size <= STEPS) return
-        while (undos.size > STEPS) undos.removeFirst()
-        while (undos.isNotEmpty() && undos.first().continues) undos.removeFirst()
+        if (undos.size <= steps) return
+        while (undos.size > steps) origin = undos.removeFirst().name
+        while (undos.isNotEmpty() && undos.first().continues) origin = undos.removeFirst().name
     }
 
     /**
@@ -125,7 +155,7 @@ class Pieces {
             val step = from.removeLast()
             var back = 0
             for (piece in step.removed) back += piece.length
-            to.addLast(Step(step.at, back, splice(step.at, step.at + step.added, step.removed), step.continues))
+            to.addLast(Step(step.at, back, splice(step.at, step.at + step.added, step.removed), step.continues, step.name))
             val end = step.at + step.added
             val at = when {
                 low < 0 || step.at <= low -> step.at
@@ -209,15 +239,72 @@ class Pieces {
     }
 
     /**
-     * Rebuilds [typed] so that it holds only what some piece still names, and rewrites every piece
-     * against it. Answers the new buffer.
+     * Copies the cheapest neighbouring pieces into one until there are no more than [most]. That is
+     * the only way to have fewer: a piece says where a run of the text is kept, and a change the
+     * history has let go of is still in the text, so its pieces are still needed. [copy] is handed
+     * a run of neighbours, puts their bytes on the end of the typed buffer as one, and answers it.
      *
-     * Typing appends to that buffer and nothing ever takes anything out of it, so a session that
-     * pastes and deletes over and over goes on holding every byte it ever held. The pieces the
-     * remembered changes are standing on are counted in as well: they name bytes the document no
-     * longer shows, and walking one of those changes back has to find them where it left them.
+     * Cheapest is fewest bytes copied, so what goes is a pair of small pieces side by side and never
+     * the oldest change for being the oldest, which can sit between two pieces of half a gigabyte.
+     * The history sees none of it: it works in the document's own offsets and in the pieces it took
+     * out, and a merge changes neither.
      */
-    fun compact(typed: ByteArray): ByteArray {
+    fun collapse(copy: (List<Piece>) -> Piece) {
+        val over = list.size - most
+        if (over <= 0 || list.size < 2) return
+        // The [over] cheapest pairs, what each costs and where it starts packed into one long, in a
+        // heap with the dearest on top. An edit adds a piece or two, so this is nearly always a scan
+        // for the one cheapest pair; walking a change back can put back more.
+        val heap = LongArray(over)
+        var size = 0
+        for (index in 0 until list.size - 1) {
+            val pair = ((list[index].length.toLong() + list[index + 1].length) shl 32) or index.toLong()
+            if (size < over) {
+                heap[size] = pair
+                rise(heap, size++)
+            } else if (pair < heap[0]) {
+                heap[0] = pair
+                sink(heap, size)
+            }
+        }
+        val starts = IntArray(size) { (heap[it] and 0xFFFFFFFFL).toInt() }
+        starts.sort()
+        // Pairs that overlap are one run of three pieces or more, copied as one. Every pair taken
+        // takes one piece out either way.
+        var next = 0
+        var read = starts[0]
+        var write = read
+        while (read < list.size) {
+            if (next < size && starts[next] == read) {
+                var last = read + 1
+                next++
+                while (next < size && starts[next] == last) {
+                    last++
+                    next++
+                }
+                list[write++] = copy(ArrayList(list.subList(read, last + 1)))
+                read = last + 1
+            } else {
+                list[write++] = list[read++]
+            }
+        }
+        list.subList(write, list.size).clear()
+    }
+
+    /** The pieces as they stand, in a copy nothing done here can change, since a piece never changes. */
+    fun toArray(): Array<Piece> = list.toTypedArray()
+
+    /**
+     * Copies what some piece still names out of [typed] into a new buffer, and rewrites every piece
+     * against it. Answers the new buffer, and leaves [typed] as it was for any save still reading it.
+     *
+     * Typing and merging append to that buffer and nothing ever takes anything out of it, so a
+     * session that pastes and deletes over and over goes on holding every byte it ever held. The
+     * pieces the remembered changes are standing on are counted in as well: they name bytes the
+     * document no longer shows, and walking one of those changes back has to find them where it
+     * left them.
+     */
+    fun compact(typed: Typed): Typed {
         var runs = LongArray(list.size + 8)
         var marks = 0
         fun mark(piece: Piece) {
@@ -250,10 +337,11 @@ class Pieces {
             kept += to - from
             entries++
         }
-        val out = ByteArray(kept)
+        // In order, so each run lands where the map says it goes.
+        val out = typed.fresh()
         for (entry in 0 until entries) {
             val from = map[entry * 3]
-            System.arraycopy(typed, from, out, map[entry * 3 + 2], map[entry * 3 + 1] - from)
+            out.copy(typed, from, map[entry * 3 + 1] - from)
         }
 
         fun moved(piece: Piece): Piece {
@@ -295,4 +383,32 @@ class Pieces {
 
     /** Only for [forEach]. */
     fun pieceAt(index: Int): Piece = list[index]
+}
+
+/** Moves the entry at [at] up [heap] until nothing above it is cheaper. */
+private fun rise(heap: LongArray, at: Int) {
+    var child = at
+    while (child > 0) {
+        val parent = (child - 1) / 2
+        if (heap[parent] >= heap[child]) return
+        val swap = heap[parent]
+        heap[parent] = heap[child]
+        heap[child] = swap
+        child = parent
+    }
+}
+
+/** Moves the entry at the top of the first [size] of [heap] down until nothing under it is dearer. */
+private fun sink(heap: LongArray, size: Int) {
+    var parent = 0
+    while (true) {
+        val left = parent * 2 + 1
+        if (left >= size) return
+        val child = if (left + 1 < size && heap[left + 1] > heap[left]) left + 1 else left
+        if (heap[parent] >= heap[child]) return
+        val swap = heap[parent]
+        heap[parent] = heap[child]
+        heap[child] = swap
+        parent = child
+    }
 }
