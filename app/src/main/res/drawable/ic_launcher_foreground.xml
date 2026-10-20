@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/ic_launcher_page"
+        android:strokeColor="@color/ic_launcher_ink"
+        android:strokeWidth="2"
+        android:strokeLineJoin="round"
+        android:pathData="M35,26H65L75,36V80a2,2 0,0 1,-2 2H35a2,2 0,0 1,-2 -2V28a2,2 0,0 1,2 -2Z" />
+    <path
+        android:strokeColor="@color/ic_launcher_ink"
+        android:strokeWidth="2"
+        android:strokeLineJoin="round"
+        android:pathData="M65,26V34a2,2 0,0 0,2 2H75" />
+    <path
+        android:fillColor="@color/ic_launcher_ink"
+        android:pathData="M42,40.5h24a2,2 0,0 1,0 4h-24a2,2 0,0 1,0 -4Z M42,49.5h24a2,2 0,0 1,0 4h-24a2,2 0,0 1,0 -4Z M42,58.5h8a2,2 0,0 1,0 4h-8a2,2 0,0 1,0 -4Z M42,67.5h8a2,2 0,0 1,0 4h-8a2,2 0,0 1,0 -4Z" />
+    <path
+        android:fillColor="@color/ic_launcher_ink"
+        android:pathData="M57.2,63.5h9.6a1.2,1.2 0,0 1,1.2 1.2v7.6a1.2,1.2 0,0 1,-1.2 1.2h-9.6a1.2,1.2 0,0 1,-1.2 -1.2v-7.6a1.2,1.2 0,0 1,1.2 -1.2Z" />
+    <path
+        android:strokeColor="@color/ic_launcher_ink"
+        android:strokeWidth="3"
+        android:pathData="M58.5,63.5v-2.5a3.5,3.5 0,0 1,7 0v2.5" />
+</vector>
