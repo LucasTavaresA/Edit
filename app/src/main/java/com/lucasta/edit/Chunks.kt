@@ -10,19 +10,15 @@ fun interface Bytes {
 
 /**
  * Layout chunks. Only the part of the document on screen is ever handed to a text layout, a couple
- * of KB at a time. Laying out text costs about 5 seconds per MB and nothing makes that per-character
- * cost smaller, so the only way to open a large file quickly is to lay out almost none of it.
+ * of KB at a time. Laying out text costs about 5 seconds per MB and nothing makes that smaller, so
+ * the only way to open a large file quickly is to lay out almost none of it.
  *
- * A chunk covers whole lines wherever it can, so its boundaries fall where a line break already is
- * and wrapping inside a chunk is exactly what wrapping the whole document would have produced. A
- * single line longer than [CHUNK_MAX] has no break to fall on, so it is cut at a space near the
- * limit — the one case where a chunk boundary is visible, as a wrap that a whole-document layout
+ * A chunk covers whole lines wherever it can, so wrapping inside one is exactly what wrapping the
+ * whole document would have produced. A single line longer than [CHUNK_MAX] is cut at a space near
+ * the limit — the one case where a chunk boundary is visible, as a wrap a whole-document layout
  * would have put a few characters later.
  *
- * Everything here counts bytes, because that is what the document is addressed in. Both targets are
- * scaled by the size of a code unit, so a chunk holds about as much text whatever the encoding, and
- * a line break is looked for as a code unit rather than as a byte: in UTF-16 a byte 0x0A is only
- * sometimes a line break, and the other times it is half of something else.
+ * Everything here counts bytes, and both targets are scaled by [Encoding.unitBytes].
  */
 const val CHUNK_TARGET = 2048
 

@@ -13,12 +13,6 @@ import kotlinx.coroutines.withContext
  * whether it is text at all are decided from the [head] that has already been read, so a file that
  * is refused is refused before anything is copied. The copy stops at [size], what the file measured
  * when it was opened.
- *
- * There is no round trip to check any more, and no strict decode either. Both existed because the
- * whole file used to be decoded on the way in and re-encoded on the way out, which made every byte
- * the decoder could not name a byte that saving would destroy. A byte-addressed document copies out
- * every range nobody edited exactly as it came in, so a file with a few bad bytes in it — or in a
- * single-byte encoding nobody can detect — opens, reads, and is safe to edit somewhere else.
  */
 fun readPlainDocument(context: Context, file: FileDescriptor, size: Long, head: ByteArray): Content {
     val encoding = sniffEncoding(head)
@@ -30,13 +24,11 @@ fun readPlainDocument(context: Context, file: FileDescriptor, size: Long, head: 
 /**
  * Writes [take] over [uri], and answers [Collision.None] once the file holds it.
  *
- * Written straight from the take, which is the document as the save took it and which nothing done
- * to the document since can reach, so there is no second copy to make first. Unless [anyway], the
- * file has to still hash the same as the base — what it held when it was last in step with the
- * document — or the answer is [Collision.Changed] and nothing is written; and a take with nothing
- * changed since then is not written either, so saving it costs one pass over the file. [anyway] is
- * for a file the user has said to write over whatever it holds, and for one just created to be
- * written into.
+ * Written straight from the take, which nothing done to the document since can reach, so there is
+ * no second copy to make first. Unless [anyway], the file has to still hash the same as the base,
+ * or the answer is [Collision.Changed] and nothing is written; a take with nothing changed since
+ * the base is not written either. [anyway] is for a file the user has said to write over, and for
+ * one just created.
  */
 suspend fun writePlainDocument(context: Context, uri: Uri, take: Take, anyway: Boolean): Result<Collision> =
     withContext(Dispatchers.IO) {

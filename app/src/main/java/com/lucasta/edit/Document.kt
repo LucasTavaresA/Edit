@@ -14,21 +14,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * What a file may be and still be opened. Nothing about the editor holds a plain file in memory any
- * more — the document is a copy of the file on disk plus the changes made to it — so this is no
- * longer a memory limit at all. What is left is patience: opening copies the file and indexes it for
- * chunk boundaries, each at roughly the speed it can be read, and everything is addressed with an
- * `Int`, which is the real ceiling at 2 GB. This sits below both, and moving it is one constant.
+ * What a plain file may be and still be opened. The document is a copy of the file on disk plus its
+ * changes, so this is not a memory limit: everything is addressed with an `Int`, which is the
+ * ceiling at 2 GB.
  */
 const val MAX_FILE_BYTES = Int.MAX_VALUE.toLong()
 
 /**
- * Encrypted files stay on the path everything used to be on: read whole, decrypted whole, held
- * whole in memory and laid out whole in a single text field rather than in chunks. Nothing about
- * the plaintext of an encrypted file should ever be inferable from how it is drawn, and a layout
- * that measures only the part you are looking at is one more thing that would have to be reasoned
- * about to be sure of that. Whole-document layout costs about 5 seconds per MB, so the cap is the
- * size that still appears in about a second, leaving the rest of that second for the key derivation.
+ * Encrypted files are read, decrypted and held whole, and laid out whole in a single text field
+ * rather than in chunks, so nothing about the plaintext can be inferred from how it is drawn.
+ * Whole-document layout costs about 5 seconds per MB, so the cap is the size that still appears in
+ * about a second, leaving the rest of that second for the key derivation.
  */
 const val MAX_ENCRYPTED_BYTES = 128L * 1024
 
@@ -135,10 +131,9 @@ enum class Collision {
     None,
 
     /**
-     * Something else wrote the file since the document was last in step with it — sync brought a
-     * newer version, or another app wrote into it, before the save or while it ran. The document is
-     * still exactly what was to be saved, so the only question is whose version the file ends up
-     * holding, and that is the user's to answer.
+     * Something else wrote the file since the document was last in step with it — sync, or another
+     * app — before the save or while it ran. The document is still what was to be saved, so whose
+     * version the file ends up holding is the user's question to answer.
      */
     Changed,
 }

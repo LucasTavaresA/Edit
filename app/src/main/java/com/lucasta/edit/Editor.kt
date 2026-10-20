@@ -68,12 +68,14 @@ private const val WINDOW_GUARD = 256
 
 /**
  * How much text the window may hold before it is cut back to size whatever the cursor is doing.
+ * Text put in the middle of the window — a paste — moves neither edge nearer the cursor, so without
+ * this the field would go on holding everything pasted into it and laying all of it out again on
+ * every keystroke.
  *
- * A window normally covers [WINDOW_CHUNKS] chunks either side of the cursor, so it is a few
- * thousand characters and a keystroke lays out a few thousand characters. Text put in the middle of
- * it, though — a paste — moves neither edge nearer the cursor, so nothing else would ever ask it to
- * move, and the field would go on holding everything pasted into it and laying all of it out again
- * on every keystroke. That is what makes an editor slower the more has been pasted into it.
+ * Lowering it does not make the window smaller. A window is whole chunks and never fewer than one,
+ * so set under about a chunk this is exceeded for ever: every change cuts the window again and
+ * disposes the field, which fails in ways no real value can. It sits just above the size a window
+ * has anyway, so to reach it, grow the document with real pastes.
  */
 private const val WINDOW_MAX = CHUNK_MAX * (2 * WINDOW_CHUNKS + 2)
 
@@ -86,11 +88,9 @@ private const val WINDOW_MAX = CHUNK_MAX * (2 * WINDOW_CHUNKS + 2)
 private const val INDEX_OFF_THREAD = 256 * 1024
 
 /**
- * How long a stretch of typing may pause before what comes next is a change of its own.
- *
- * Every keystroke is recorded, so this decides only how many of them one press of undo walks back,
- * which is a question about what feels like one edit rather than about what the document knows. The
- * pause is measured from the last keystroke and not from the start of the run.
+ * How long a stretch of typing may pause before what comes next is a change of its own, measured
+ * from the last keystroke. Every keystroke is recorded either way, so this decides only how many of
+ * them one press of undo walks back.
  */
 private const val PAUSE_MILLIS = 1_000L
 
@@ -100,23 +100,16 @@ private val TAIL = 160.dp
 /**
  * The document, plus the slice of it that is currently editable.
  *
- * The document is a [Content]: a copy of the file plus the changes made to it, addressed in
- * bytes. Nothing here holds the text of the file — a row is decoded when it is drawn and thrown
- * away when it scrolls off, and what is in memory measures the editing rather than the file.
+ * The document is a [Content], addressed in bytes. A row is decoded when it is drawn and thrown
+ * away when it scrolls off, so nothing here holds the text of the file.
  *
- * On top of it sits a window — a few chunks around the cursor, held in a [TextFieldState] — which
- * is what actually takes input. Every other chunk on screen is laid out read-only, and everything
- * off screen is not laid out at all. The window is committed back into the document and cut again
- * around the cursor whenever the cursor nears an edge of it or it has been filled past
- * [WINDOW_MAX], so no amount of typing, deleting or pasting is confined to where it started and
- * none of it makes the next keystroke slower.
+ * The window — a few chunks around the cursor, held in a [TextFieldState] — is what takes input.
+ * Every other chunk on screen is laid out read-only, and everything off screen is not laid out at
+ * all. The window is cut again around the cursor whenever the cursor nears an edge of it or it has
+ * been filled past [WINDOW_MAX]. A selection reaching outside it is held as [marked].
  *
- * A selection that reaches outside the window cannot be held by the field at all — select-all on a
- * gigabyte is not a thing a text field can hold — so it is held here as [marked] instead: the rows
- * draw it, and the next edit made while it stands replaces the whole of it in the document.
- *
- * Every offset in here is a byte offset into the document. The window's own are characters, because
- * that is what a text field deals in, and [Slice] is what crosses between the two.
+ * Every offset in here is a byte offset into the document, except the window's own, which are
+ * characters; [Slice] crosses between the two.
  *
  * [spill] is where the document it starts with keeps its typed buffer once that is too large for
  * memory.
@@ -176,7 +169,6 @@ class DocumentState(spill: File?) : Closeable {
     var marked: TextRange? by mutableStateOf(null)
         private set
 
-    /** Whether there is anything to walk back, which is only ever what the change list holds. */
     var canUndo by mutableStateOf(false)
         private set
 
@@ -192,12 +184,11 @@ class DocumentState(spill: File?) : Closeable {
     /**
      * Whether the document is holding changes the rows have not been told about.
      *
-     * Every keystroke goes into the document as it happens — see [record] — but everything typed
-     * lands inside the window, so every row outside it is drawing exactly the text it was drawing
-     * before and only its offsets have moved. Telling them is what costs: re-indexing chunks and
-     * shifting every key after the cursor, per keystroke, on a document of any size. So the rows go
-     * on addressing the document as it was when the window opened, and [commit] is what moves them
-     * on — which is what already happens whenever the window is cut, saved or walked back.
+     * Every keystroke goes into the document as it happens — see [record] — but it lands inside
+     * the window, so every row outside it draws the same text as before and only its offsets have
+     * moved. Telling them means re-indexing and shifting every key after the cursor, per keystroke,
+     * so the rows go on addressing the document as it was when the window opened until [commit]
+     * moves them on.
      */
     private var behind = false
 
@@ -214,14 +205,7 @@ class DocumentState(spill: File?) : Closeable {
 
     /**
      * Where the row at the top of the screen starts, and where the last one on it does, kept
-     * current by [DocumentEditor].
-     *
-     * The list holds its scroll position by remembering the key of the top row and finding it again
-     * after the rows change. A window that swallowed that row would leave it with nothing to hold
-     * on to, and it would fall back on the row's old number — which by then points somewhere else,
-     * because the window it just left expanded back into chunks and the one it opened collapsed a
-     * few into one. So the window never starts above this row; when it has to, [reach] moves the
-     * row instead, which is a nudge of a few lines and costs nothing after it.
+     * current by [DocumentEditor]. The window never starts above the top row — see [reach].
      *
      * Not snapshot state: it changes with every scrolled pixel and nothing is drawn from it.
      */
@@ -232,19 +216,17 @@ class DocumentState(spill: File?) : Closeable {
     /**
      * Which window the field is to take focus for, or -1 when nobody is waiting for it.
      *
-     * Addressed to a window rather than kept as a bare flag, because cutting the window again
-     * leaves two rows alive at once: the one being replaced re-runs its effects before the new one
-     * has composed, so a flag would be taken by the row that is about to be disposed and go with
-     * it — leaving the field that survives unfocused, which ends Compose's input session and shuts
-     * the keyboard. The row that may have it is the one drawing the window it was set for.
+     * Addressed to a window rather than kept as a flag, because cutting the window leaves two rows
+     * alive at once: the one being replaced re-runs its effects before the new one has composed, so
+     * a flag would be taken by the row about to be disposed and go with it, leaving the field that
+     * survives unfocused and the keyboard shut.
      */
     private var focusFor = -1
 
     /**
-     * One chunk for the whole document, which is what encrypted files get: the window then covers
-     * everything, every edit is an ordinary edit in one text field, and the layout is the whole
-     * document's the way it was before any of this. It only works because such a document is
-     * capped at [MAX_ENCRYPTED_BYTES].
+     * One chunk for the whole document, which is what encrypted files get: the window covers
+     * everything and every edit is an ordinary edit in one text field. Only possible because such a
+     * document is capped at [MAX_ENCRYPTED_BYTES].
      */
     private var whole = false
 
@@ -290,11 +272,10 @@ class DocumentState(spill: File?) : Closeable {
      * Saves the document as it stands, window edits included, through [write], and moves the base on
      * once the file holds it.
      *
-     * What [write] gets is taken here, on the main thread in one step with nothing that waits, so
-     * the keyboard's events queue behind it for well under a frame and none of them can land half
-     * way through it. [write] writes from that alone, off the main thread, while the document goes
-     * on being edited as ever. The base moves back here, still within the save's turn, since the
-     * next save's take reads what it sets.
+     * The take is made here on the main thread, in one step with nothing that waits, so no keyboard
+     * event can land half way through it; [write] writes from it alone, off the main thread. The
+     * base moves back here, still within the save's turn, since the next save's take reads what it
+     * sets.
      */
     suspend fun save(write: suspend (Take) -> Result<Collision>): Result<Collision> {
         // An edit made over a mark and not yet applied is applied first, or the take would have the
@@ -322,14 +303,7 @@ class DocumentState(spill: File?) : Closeable {
         changed()
     }
 
-    /**
-     * Selects the whole document.
-     *
-     * The field can only ever hold the window, so what it gets is its own text selected and the
-     * rest is [marked]: the rows draw it, and whatever is typed, pasted or deleted next replaces
-     * all of it at once. Nothing is decoded, laid out or copied to do this, so it costs the same on
-     * a gigabyte as on a line.
-     */
+    /** Selects the whole document: the field's own text, and the rest as [marked]. */
     suspend fun selectAll() {
         marked = null
         // Before the emptiness test, not after: a document typed from new holds everything it has
@@ -372,10 +346,9 @@ class DocumentState(spill: File?) : Closeable {
      * Keeps the window around the cursor and keeps it small: cut again whenever the cursor comes
      * within [WINDOW_GUARD] of an edge, or whenever more than [WINDOW_MAX] has been put into it.
      *
-     * Called for every change to the field, and not only for every move of the cursor. Deleting
-     * forwards does not move the cursor and pasting does not move it towards an edge, so a window
-     * that only followed the cursor would never follow either of them — it would be eaten from the
-     * inside until it ran out, and an edit would be confined to the few kilobytes it opened in.
+     * Called for every change to the field, not only for every move of the cursor: deleting
+     * forwards does not move the cursor and pasting does not move it towards an edge, and both
+     * still have to move the window.
      *
      * Left alone while a selection is being dragged, since moving the window under a drag would
      * fight the gesture.
@@ -383,10 +356,9 @@ class DocumentState(spill: File?) : Closeable {
     suspend fun follow() {
         if (windowStart < 0) return
         if (swallow()) return
-        // Before anything that suspends, so that what the field holds reaches the change list while
-        // it is still what the field holds. This flow conflates, so keystrokes arriving faster than
-        // a frame are recorded as one change — which is what a run of typing is grouped into
-        // anyway, and nothing is lost by it.
+        // Before anything that suspends, so what reaches the change list is what the field holds
+        // now. The flow conflates, so keystrokes faster than a frame are one change, which loses
+        // nothing.
         record()
         track()
         // The layout that says where the cursor is drawn is a frame behind whatever was just typed,
@@ -394,6 +366,10 @@ class DocumentState(spill: File?) : Closeable {
         // arrives, this runs once a frame rather than once a keystroke.
         withFrameNanos { }
         if (windowStart < 0) return
+        // Before deciding whether to cut, so that a cut never lands on a field that is off screen.
+        // Scrolling away from the cursor does not dispose the field either: a focused field pins
+        // the list item it sits in (its FocusableNode does, in foundation 1.12, and nothing
+        // documents it), so the keyboard stays up and the next keystroke brings it back here.
         showCursor()
         val selection = window.selection
         if (!selection.collapsed || whole) return
@@ -416,14 +392,10 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * Whether the row drawing [start] is the one being asked to take focus: true once per cutting
-     * of the window, so the field takes focus when it appears but not every time scrolling brings
-     * it back. A row left over from the window's last position does not match, and so cannot take
-     * the answer away with it.
-     *
-     * Only asks. What answers is [focusTaken], once the field really holds focus — because the row
-     * that asks may be disposed, or its effect cancelled by the next cut, before it ever gets
-     * there, and a flag cleared on the way out would be a keyboard nobody reopens.
+     * Whether the row drawing [start] is the one being asked to take focus: true once per cut of
+     * the window, so the field takes focus when it appears but not every time scrolling brings it
+     * back. Only asks; [focusTaken] answers, once the field really holds focus, since the row
+     * asking may be disposed, or its effect cancelled by the next cut, before it gets there.
      */
     fun wantsFocus(start: Int) = focusFor >= 0 && focusFor == start
 
@@ -434,25 +406,20 @@ class DocumentState(spill: File?) : Closeable {
 
     /**
      * Applies an edit made while a selection reached outside the window, and answers whether it
-     * did. What the field was holding stood in for the whole of [marked], so replacing the whole of
-     * the field replaces the whole of the mark — which is select-all and type, select-all and
-     * paste, and select-all and delete, none of which the field could have done itself.
-     *
-     * Anything smaller than the whole field is the field being edited normally, and drops the mark.
+     * did: select-all and type, paste or delete, none of which the field could do itself.
      */
     private fun swallow(): Boolean {
         val mark = marked ?: return false
         val now = window.text
         if (change(windowSlice.text, now) == null) {
-            // Nothing typed yet. The mark stands for as long as the field is still wholly selected,
-            // which is also what says that an edit arriving later replaced the whole of it.
+            // Nothing typed yet. The mark stands only while the field is still wholly selected.
             val selection = window.selection
             if (selection.min != 0 || selection.max != windowSlice.text.length) marked = null
             return false
         }
-        // The field's whole text stood in for the mark, so whatever it holds now is what the whole
-        // of the mark becomes — and not the run a diff would name, which for a replacement that
-        // happens to begin or end the way the old text did would leave part of the mark standing.
+        // The field's whole text stood in for the mark, so whatever it holds now replaces all of
+        // it, and not the run a diff would name: a replacement that begins or ends the way the old
+        // text did would leave part of the mark standing.
         marked = null
         val typed = content.encoding.encode(now, 0, now.length)
         val from = minOf(mark.min, windowStart)
@@ -469,19 +436,9 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * Writes whatever the field has changed into the document, as a change of its own.
-     *
-     * Called for every change to the field, so that every state the text passes through is in the
-     * change list. The keyboard's own undo is not the only thing that can take text back, and text
-     * the document never saw cannot be brought back by anything — which is the whole of why this
-     * no longer waits for the window to have to move.
-     *
-     * What goes in is the run the typing actually touched and not the whole window — the window is
-     * a few thousand bytes and almost none of it was typed, and writing all of it back would fill
-     * the typed buffer with text nobody typed and leave the file's own bytes for that run behind,
-     * which is exactly what byte pieces exist to avoid.
-     *
-     * The rows are not told. See [behind].
+     * Writes the run the field has changed, as [change] names it, into the document as a change of
+     * its own. Called for every change to the field, since text the document never saw cannot be
+     * brought back by anything. The rows are not told; see [behind].
      */
     private fun record() {
         if (windowStart < 0) return
@@ -563,12 +520,11 @@ class DocumentState(spill: File?) : Closeable {
     /**
      * Gives the window room to reach back over the row the list is holding its place by.
      *
-     * The list finds its place again by the key of the top row, so a window that covered that row
-     * would leave it with nothing to find. Scrolling up by the part of that row which is already
-     * above the screen, and one pixel more, makes the row before it the one being held — which the
-     * window may then start at, keeping the key alive. It is a nudge of a few lines, because the
-     * cursor is by then near the top of that row and the screen is showing the top of it too, and
-     * after it nothing jumps: the window draws that row's text exactly where the row drew it.
+     * The list finds its place again by the key of the top row. A window covering that row would
+     * leave it nothing to find, and it would fall back on the row's old number, which by then
+     * points somewhere else. Scrolling up by the part of that row already above the screen, and
+     * one pixel more, makes the row before it the one being held, and the window may then start at
+     * it. That stays a nudge of a few lines only because [showCursor] keeps the cursor on screen.
      *
      * Refused when the row is scrolled far enough off the top that the nudge would not be a nudge —
      * tapping into the last visible line of a long row. The window then keeps the reach it has, and
@@ -585,15 +541,9 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * Scrolls until the cursor is on screen.
-     *
-     * Nothing else does it. The field lays out inside a list item and the list is what scrolls, so
-     * a cursor walking off the top of the screen is invisible to both — which is what deleting
-     * backwards does, since the text below the cursor moves up and the cursor does not.
-     *
-     * It is also what keeps [reach] able to work at all: the nudge it makes is the part of the top
-     * row that is already above the screen, and that is only small while the cursor is near the top
-     * of the screen as well as near the start of the window.
+     * Scrolls until the cursor is on screen. The field lays out inside a list item and the list is
+     * what scrolls, so neither knows where the cursor is, and deleting backwards walks it off the
+     * top: the text below it moves up and the cursor does not.
      */
     private suspend fun showCursor() {
         val list = this.list ?: return
@@ -645,7 +595,6 @@ class DocumentState(spill: File?) : Closeable {
         track()
     }
 
-    /** What the buttons say, which is now only ever what the document says: see [record]. */
     private fun track() {
         canUndo = content.canUndo
         canRedo = content.canRedo
@@ -664,11 +613,8 @@ class DocumentState(spill: File?) : Closeable {
 
 /**
  * Which rows the list draws: every chunk, except that the ones the window covers are one row.
- *
- * Worked out from the chunk index rather than held as a list of rows. A list is one object per
- * chunk, built again on every edit, and a chunk is two kilobytes — so on a large document that is
- * hundreds of thousands of objects and megabytes of garbage per keystroke, for an answer that is
- * two comparisons and an addition.
+ * Worked out from the chunk index rather than held as a list, which on a large document would be
+ * hundreds of thousands of objects built again on every edit.
  */
 private class Rows(
     private val chunks: IntArray,
@@ -724,16 +670,13 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier) {
                 (visible.lastOrNull { it.key is Int }?.key as? Int)?.let { state.visibleTo = it }
             }
     }
-    // Every change to the field, and not only every move of the cursor: deleting forwards moves no
-    // cursor and a paste moves it nowhere near an edge, and both still have to move the window.
     // Collected here rather than in the row, so it goes on running while the row is recomposed.
     LaunchedEffect(state) {
         snapshotFlow { state.window.text to state.window.selection }.collect { state.follow() }
     }
     // The ground under the rows, which is the rest of the screen whenever the document is shorter
-    // than one — a document just opened, or a new one, where it is nearly all of it. A row and the
-    // field each consume their own taps and the list consumes a drag, so what is left to arrive
-    // here is a tap that landed on nothing, and the end of the document is what lies under it.
+    // than it. Rows and the field consume their own taps and the list consumes drags, so what
+    // arrives here is a tap on nothing, and the end of the document is what lies under it.
     val onGround = Modifier.pointerInput(state) {
         detectTapGestures { scope.launch { state.focus(state.length) } }
     }
@@ -762,9 +705,7 @@ private fun ChunkRow(state: DocumentState, start: Int, end: Int, scope: Coroutin
     }
     val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
     val ground = LocalTextSelectionColors.current.backgroundColor
-    // A selection reaching across the document is drawn here, because the field holding the window
-    // is only ever holding part of it. Nothing is built for the rows it does not cover, which on a
-    // document of any size is nearly all of them.
+    // Nothing is built for the rows [marked] does not cover, which is nearly all of them.
     val marked = state.marked
     val shown = remember(slice, marked, ground) {
         val mark = marked
@@ -836,18 +777,12 @@ private fun WindowRow(state: DocumentState, start: Int) {
 }
 
 /**
- * The keyboard's own undo and redo, taken before the field can answer them.
+ * The keyboard's own undo and redo, ctrl+Z and ctrl+Y, taken before the field can answer them out
+ * of a history of its own, which every cut of the window throws away and the document knows nothing
+ * about. They belong to the change list, as the toolbar's buttons do.
  *
- * They arrive as ordinary key events — ctrl+Z and ctrl+Y — and a text field answers them out of a
- * history of its own: scratch that every cut of the window throws away, and that the document knows
- * nothing about. Where the two met, typing was destroyed for good, because text the field took back
- * had never been written into the document and the field's way forward went with the next cut. So
- * they belong to the change list exactly as the toolbar's own buttons do, and the field is left with
- * no history to answer out of.
- *
- * Both directions are consumed whichever way they arrive, key up included, so that nothing of them
- * reaches the field. Ctrl+shift+Z is taken as a redo alongside ctrl+Y: it is what the other half of
- * the world's keyboards send, and it means nothing here otherwise.
+ * Consumed whichever way they arrive, key up included, so nothing of them reaches the field.
+ * Ctrl+shift+Z is taken as a redo too: it is what the other half of the world's keyboards send.
  */
 private fun undoKey(event: KeyEvent, state: DocumentState, scope: CoroutineScope): Boolean {
     if (!event.isCtrlPressed) return false

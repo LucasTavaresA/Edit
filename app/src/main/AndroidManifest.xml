@@ -7,21 +7,17 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Edit">
         <!--
-            Every configuration change we can take ourselves is taken here, because the alternative
-            is the activity being rebuilt: the open document lives in the composition and there is
-            nothing to restore it from — the buffer is far too big for a saved instance state and no
-            permission is held that would let the file be read a second time. Rotating is the one
-            that happens by accident, but a scheduled switch into dark mode would be worse, since it
-            would arrive in the middle of editing. Nothing here is read outside composition, so
-            Compose sees the new configuration and lays out again on its own.
+            Every configuration change we can take ourselves is taken, because the alternative is
+            the activity being rebuilt, and nothing can restore the open document: its descriptor
+            and pieces do not fit a saved instance state, and no permission is held that would let
+            the file be opened again. Nothing is read outside composition, so Compose sees the new
+            configuration and lays out again on its own.
         -->
         <!--
-            The keyboard must arrive as an inset and never as a shove. Left unsaid this is
-            `adjustUnspecified` and the system picks, which it did differently per orientation:
-            portrait resized, landscape panned — and panning slides the whole window up to keep the
-            cursor above the keyboard, which took the toolbar off the top of the screen and cut the
-            file's name in half against the status bar. Asking for resize is what makes the IME an
-            inset the layout can pay deliberately, in the one place that should pay it.
+            The keyboard must arrive as an inset and never as a shove. Left unsaid, the system
+            picks per orientation, and panning slides the whole window up, taking the toolbar off
+            the top of the screen. Resize makes the IME an inset the layout pays in the one place
+            that should pay it.
         -->
         <activity
             android:name=".MainActivity"

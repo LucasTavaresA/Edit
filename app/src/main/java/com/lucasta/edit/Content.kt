@@ -104,6 +104,12 @@ internal inline fun passes(fd: FileDescriptor, limit: Long = Long.MAX_VALUE, blo
  * same bytes, which is how a save tells whether anything else has written its file: whatever was
  * written and however, while nothing that leaves the bytes as they were — a new time on the file, or
  * the same contents put back — counts as a change.
+ *
+ * Nothing the file reports about itself can stand in for it. A file picked through the external
+ * storage provider is written through a layer that stamps its own time, when the copy loop ended
+ * rather than when the bytes reached the file, seconds apart on a large one; and a tool that
+ * empties the file partway through a save and writes something shorter leaves it at exactly the
+ * size we wrote.
  */
 internal fun hash(fd: FileDescriptor): ByteArray {
     val digest = digest()
@@ -114,27 +120,20 @@ internal fun hash(fd: FileDescriptor): ByteArray {
 private fun digest(): MessageDigest = MessageDigest.getInstance("SHA-256")
 
 /**
- * A document: a [Snapshot] of the file, plus the changes made to it.
- *
- * What a save writes is that copy with our edits in it and not one byte from anywhere else — never
- * something another tool put there in the meantime.
+ * A document: a [Snapshot] of the file, plus the changes made to it. What a save writes is that
+ * copy with our edits in it and not one byte from anywhere else.
  *
  * Coordinates are bytes, on both sides. A piece is a byte range whichever it points at, so a range
- * nobody edited is copied to the output exactly as it came in and only the parts that were touched
- * are ever decoded or encoded. That is what makes a save incapable of corrupting what was not
- * edited, and what makes a file no decoder round-trips openable and editable. The cost is that
- * everything looking for a line break has to look in code units and not in bytes, since in UTF-16 a
- * byte 0x0A is only sometimes a line break.
+ * nobody edited is copied out exactly as it came in and only what was touched is ever decoded or
+ * encoded. That is what keeps a save from corrupting anything not edited, and what lets a file no
+ * decoder round-trips be opened and edited. The cost is that a line break has to be looked for in
+ * code units and not in bytes — see [Encoding].
  *
- * It keeps the copy and the typed buffer for as long as it is open, and no save moves it onto
- * another. Every state it has been in since it opened is made of those two, so the history, which
- * points into them and never into the file, reaches all of them, and nothing done to the file —
- * saving it, Save as, another app writing it — can reach the history.
+ * The copy and the typed buffer are kept for as long as the document is open, and the history
+ * points into them and never into the file, so nothing done to the file can reach it.
  *
  * A document with no file behind it — a new one, or a decrypted one — is the same thing with every
- * piece pointing at the typed buffer. There is nothing else to be: the encrypted path holds its
- * plaintext whole, in memory, and puts no piece of it into a file anywhere, which is why its typed
- * buffer is the one that never moves onto disk.
+ * piece pointing at the typed buffer, which for a decrypted one never moves onto disk.
  */
 class Content private constructor(
     private val file: Snapshot?,
@@ -233,12 +232,10 @@ class Content private constructor(
     fun redo(): Span? = pieces.redo().also { settle() }
 
     /**
-     * Keeps the pieces under their limit, which walking a change back can take them over as well as
-     * making one can, and lets go of whatever the typed buffer is holding that no piece names any
-     * more, which is what a session of pasting and deleting leaves behind. That is only ever looked
-     * for once the buffer is large enough for it to matter, and the next look is put off until it
-     * has doubled again, so a buffer that is all still in use is not copied over and over to learn
-     * that.
+     * Keeps the pieces under their limit, which undoing a change can pass as well as making one,
+     * and lets go of what the typed buffer holds that no piece names any more. That is looked for
+     * only once the buffer is large enough to matter, and not again until it has doubled, so a
+     * buffer that is all still in use is not copied over and over.
      */
     private fun settle() {
         pieces.collapse(::merged)
@@ -265,12 +262,7 @@ class Content private constructor(
         return Piece(typed.append(bytes), total, typed = true)
     }
 
-    /**
-     * Everything a save writes, taken in one step with nothing that waits: the pieces, the typed
-     * buffer as far as it goes now, a hold on the private copy, the base's hash and the place the
-     * document stands on. What it takes stays readable until the save closes it, whatever is done
-     * to the document meanwhile.
-     */
+    /** Everything a save writes, taken in one step with nothing that waits — see [Take]. */
     fun take(): Take = Take(
         encoding, format, pieces.toArray(), file?.hold(), typed.view(), baseHash, pieces.place, !unsaved,
     )

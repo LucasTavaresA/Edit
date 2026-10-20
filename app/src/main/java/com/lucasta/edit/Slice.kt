@@ -7,17 +7,11 @@ import java.nio.charset.CodingErrorAction
 /**
  * A run of the document's bytes, decoded for the screen, and the map back.
  *
- * Everything the document is made of is bytes, and everything drawn or typed into is characters, so
- * every tap and every cursor has to cross between the two. Crossing is arithmetic wherever the
- * bytes decode — [Encoding.encodedLength] is exact — so the map carries nothing at all for ordinary
- * text. [marks] holds a pair of offsets, characters and bytes, only at each place the decoding was
- * not a bijection: where a byte sequence the encoding does not allow was shown as one replacement
- * character. It always begins with a pair at the start, so there is always something to count from.
- *
- * That is what a byte-addressed document buys. A file with a few bad bytes in it opens, is read,
- * and can be edited anywhere, because the bad bytes are only ever *shown* as something else — they
- * are still in the file, and a save that did not touch them copies them out exactly as they came
- * in.
+ * Crossing between bytes and characters is arithmetic wherever the bytes decode —
+ * [Encoding.encodedLength] is exact — so the map carries nothing for ordinary text. [marks] holds a
+ * pair of offsets, characters and bytes, only where the decoding was not a bijection: where a byte
+ * sequence the encoding does not allow was shown as one replacement character. It always begins
+ * with a pair at the start, so there is always something to count from.
  */
 class Slice(
     val text: String,
@@ -112,13 +106,9 @@ class Slice(
 }
 
 /**
- * Decodes a run of the document.
- *
- * Bytes the encoding does not allow are shown as one replacement character each and recorded as a
- * mark, rather than refusing the file: a mostly-fine file with a few bad bytes in it is worth
- * reading, and under a byte-addressed document it is safe to edit as well, because saving copies
- * out every byte nobody touched exactly as it came in. What refuses a file is [notText], before any
- * of this.
+ * Decodes a run of the document. Bytes the encoding does not allow are shown as one replacement
+ * character each and recorded as a mark rather than refusing the file, since a save copies them out
+ * untouched; what refuses a file is [notText], before any of this.
  */
 fun decode(bytes: ByteArray, encoding: Encoding): Slice {
     val decoder = encoding.charset.newDecoder()
@@ -157,11 +147,9 @@ fun decode(bytes: ByteArray, encoding: Encoding): Slice {
         mark(out.position(), bad)
         out.put('\uFFFD')
 
-        // One unit past it and no further. A file in some single-byte encoding nobody can name is
-        // ordinary text with a bad byte every few words, and a decoder that reports a bad run
-        // reaching past the first byte takes readable characters off the screen with it. Reading
-        // again from the next unit shows one replacement for every byte that cannot be named, and
-        // every byte that can.
+        // One unit past it and no further. A file in a single-byte encoding nobody can name is text
+        // with a bad byte every few words, and a decoder reporting a bad run past its first byte
+        // takes readable characters off the screen with it.
         at = minOf(bad + encoding.unitBytes, bytes.size)
         mark(out.position(), at)
     }
@@ -199,11 +187,10 @@ class Change(val from: Int, val was: Int, val now: Int)
  *
  * The answer is the run the typing actually touched and not the whole window. A window is a few
  * thousand bytes of which almost none was typed, and committing all of it would fill the typed
- * buffer with text nobody typed and leave the file's own bytes for that run behind — which is
- * exactly what a document made of byte ranges exists to avoid.
+ * buffer with text nobody typed and leave the file's own bytes for that run behind.
  *
- * Neither end may fall between the halves of a surrogate pair. The two halves are one character and
- * one place in the file, and either half on its own encodes to a replacement rather than to itself.
+ * Neither end may fall between the halves of a surrogate pair, since either half on its own encodes
+ * to a replacement rather than to itself.
  */
 fun change(was: CharSequence, now: CharSequence): Change? {
     val shortest = minOf(was.length, now.length)

@@ -19,17 +19,13 @@ internal const val SPILL_BYTES = 16 shl 20
 
 /**
  * The buffer holding what was typed, and what merging pieces has copied in. Nothing in it is ever
- * written over: bytes go on the end, so a piece that names a run of it names the same bytes for as
- * long as the buffer is there, and the only way to let go of what nothing names any more is to copy
- * what still is into another one.
+ * written over, so a piece names the same bytes for as long as the buffer is there, and the only
+ * way to let go of what nothing names any more is to copy what still is into another one.
  *
- * Bytes go into memory, and a plain document's move onto the end of a file in [directory] whenever
- * what is in memory would pass [limit]: in app storage and unlinked from the moment it is open, so
- * nothing but this can reach it, the way the private copy of the file is kept. A disk that refuses
- * them — full, most likely — leaves them in memory, where they would be if there were no disk at
- * all, and the move is tried again once as much again has gone in: a full disk costs heap, and never
- * an edit. An encrypted document's never move, since no byte of a plaintext is written anywhere, and
- * [directory] is null for it.
+ * A plain document's bytes move onto the end of a file in [directory] whenever what is in memory
+ * would pass [limit], unlinked in app storage the way the private copy is. A disk that refuses them
+ * leaves them in memory, and the move is tried again once as much again has gone in: a full disk
+ * costs heap, never an edit. [directory] is null for an encrypted document, whose bytes never move.
  */
 class Typed(private val directory: File?, private val limit: Int = SPILL_BYTES) : Closeable {
 
@@ -68,12 +64,11 @@ class Typed(private val directory: File?, private val limit: Int = SPILL_BYTES) 
     fun read(at: Int, into: ByteArray, offset: Int, count: Int) = read(file, memory, spilled, at, into, offset, count)
 
     /**
-     * Everything this holds now, as something that goes on reading exactly that for as long as it
-     * is held, whatever this does next — which is what a save writes from while the document goes
-     * on being edited. Nothing is copied to make it. Nothing is ever written below where the buffer
-     * ends, growing it in memory copies it somewhere new, moving it onto disk leaves the memory it
-     * was in as it was, and compacting it makes another one; so what a view names stays put, and
-     * all that has to be done for it is to keep the file it may be reading open until it lets go.
+     * Everything this holds now, readable as exactly that for as long as it is held, whatever this
+     * does next: what a save writes from while the document goes on being edited. Nothing is copied
+     * to make it, since nothing below where the buffer ends is ever written, growing or moving it
+     * leaves the old memory as it was, and compacting makes another buffer; only the file has to be
+     * kept open.
      */
     fun view(): View = View(memory, file?.hold(), spilled, length)
 
@@ -146,8 +141,8 @@ private fun read(file: Spill?, memory: ByteArray, spilled: Int, at: Int, into: B
 
 /**
  * A file only this process can reach, holding the part of a typed buffer that has moved out of
- * memory: unlinked from the moment it is open. It stays open for as long as anything holds it — the buffer, and any
- * view a save is still writing from — and the last of them to let go closes it.
+ * memory: unlinked from the moment it is open. It stays open for as long as anything holds it — the
+ * buffer, and any view a save is still writing from — and the last of them to let go closes it.
  *
  * Reads and writes name where they go, so a view reading on one thread and the buffer growing on
  * another never move anything the other depends on. Nothing may use it from a thread that can be

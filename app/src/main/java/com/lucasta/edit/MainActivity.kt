@@ -108,16 +108,14 @@ private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorSchem
 }
 
 /**
- * The primary family taken off the tonal ramp the phone actually publishes, because the scheme it
- * came from has the wrong accent on One UI. There are two sets of system colours: the old
- * `system_accent1_*` ramp, and the colour roles API 34 added on top of it — `system_primary_dark`
- * and the rest. Compose prefers the roles where they exist, but One UI fills in only the ramp and
- * leaves the roles at the AOSP default, so the phone's accent is published and simply not looked
- * at. Reading the ramp and mapping the tones the way Material does puts it back.
+ * The primary family taken off the tonal ramp the phone actually publishes. There are two sets of
+ * system colours: the `system_accent1_*` ramp, and the colour roles API 34 added on top of it —
+ * `system_primary_dark` and the rest. Compose prefers the roles where they exist, but One UI fills
+ * in only the ramp and leaves the roles at the AOSP default, so the phone's accent is published and
+ * not looked at. Reading the ramp and mapping the tones the way Material does puts it back.
  *
- * Only the primary family is corrected: it is the accent the toolbar is drawn in, and the rest of
- * the app is text on a ground. The neutrals have the same split and are left alone for the same
- * reason — nothing here is drawn in them that would show the difference.
+ * Only the primary family, since it is the accent the toolbar is drawn in. The neutrals have the
+ * same split, but nothing here is drawn in them that would show it.
  */
 @RequiresApi(Build.VERSION_CODES.S)
 @Composable
@@ -140,12 +138,11 @@ private fun ColorScheme.accentedLikeTheSystem(dark: Boolean): ColorScheme {
 }
 
 /**
- * The same scheme with every ground it paints taken to pure black. On an OLED panel a black
- * pixel is an unlit pixel: dark mode costs nothing but the text drawn on it, and the dark greys
- * Material would otherwise use light the whole screen up. Only the grounds move — what is drawn on
- * them keeps the colours the scheme chose, so contrast goes up rather than down. [surfaceTint] goes
- * black as well, since that is the colour elevation would use to lift a surface back off the black.
- * [outlineVariant] is the one foreground that moves, for the reason given where it is set light.
+ * The same scheme with every ground taken to pure black. On an OLED panel a black pixel is an
+ * unlit one, where Material's dark greys light the whole screen up. What is drawn on the grounds
+ * keeps its colours, so contrast goes up. [surfaceTint] goes black too, since elevation would use
+ * it to lift a surface back off the black. [outlineVariant] is the one foreground that moves, for
+ * the reason given in [systemColorScheme].
  */
 private fun ColorScheme.unlit(): ColorScheme = copy(
     background = Color.Black,
@@ -166,9 +163,8 @@ private fun ColorScheme.unlit(): ColorScheme = copy(
 private const val UNTITLED = "untitled.txt"
 
 /**
- * A document with no file behind it, which is what the app starts with and what New goes back to.
- * There is nowhere to write it, so Save does nothing at all until Save as has been through and said
- * where it goes; [UNTITLED] is only the name that dialog is offered, not a file that exists.
+ * What the bar says while the document has no file behind it: at start, and after New. Save stays
+ * off until Save as has said where it goes.
  */
 private const val NO_FILE = "no file"
 
@@ -205,16 +201,13 @@ private class Notice(val text: String, val hold: Hold) {
 }
 
 /**
- * Opening a file, New and saving take turns: one at a time, in the order they were asked for. Two
- * saves at once would write the same file at once, and each would find the other's write there and
- * ask about it as somebody else's. A save ends by moving the base the next save's take reads and by
- * naming the file it wrote, which an open or New in between would have replaced. Nothing is refused
- * and no button goes off while one of them runs: whatever is asked for meanwhile waits for it.
+ * Opening a file, New and saving take turns: one at a time, in the order they were asked for, and
+ * nothing is refused meanwhile. Two saves at once would each find the other's write in the file and
+ * ask about it as somebody else's, and a save ends by moving the base and naming the file it wrote,
+ * which an open or New in between would already have replaced.
  *
- * The turns are the process's rather than one screen's. Another app handing a file over can start a
- * second copy of Edit beside the first, and both run here, so taking turns across the two is what
- * stops them writing the same file at once, or one opening a file the other is halfway through
- * writing.
+ * The turns are the process's rather than one screen's, since another app handing a file over can
+ * start a second copy of Edit beside the first.
  */
 private val turns = Mutex()
 
@@ -241,11 +234,7 @@ private fun Editor(opened: Uri? = null) {
     // go last closes it.
     DisposableEffect(document) { onDispose { document.close() } }
 
-    /**
-     * Puts [message] in the bar that names the file, which is where everything the app has to say
-     * goes: which file is open, that one is opening or saving, that it saved, and why it could not
-     * be opened or saved. [hold] is how long it keeps the bar over the keyboard to say it.
-     */
+    /** Puts [message] in the bar that names the file, held over the keyboard as [hold] says. */
     fun say(message: String, hold: Hold = Hold.Never) {
         notice = Notice(message, hold)
     }
@@ -345,11 +334,6 @@ private fun Editor(opened: Uri? = null) {
     }
 
     /**
-     * Saving asks before writing over a file that something else has written since it was opened
-     * or last saved. The document itself is fine either way — it reads its own copy — so the only
-     * question is whose version the file ends up holding, and that is the user's to answer and not
-     * ours.
-     *
      * Which file, and what goes into it, are both taken when the save's turn comes rather than when
      * Save was pressed: a file opened in between is the document by then, and writing it into the
      * file it replaced would be worse than saving nothing.
@@ -366,11 +350,10 @@ private fun Editor(opened: Uri? = null) {
     val safe = WindowInsets.safeDrawing
     val pixel = with(LocalDensity.current) { 1.toDp() }
     val typing = WindowInsets.ime.getBottom(LocalDensity.current) > 0
-    // The column owes the top and the sides and nothing else. The bottom, keyboard included, is
-    // the bottom row's to pay, and that split is what keeps the toolbar still: `safeDrawing` counts
-    // the IME, so padding the whole column with it made the row shorter the instant the keyboard
-    // came up — the row takes its height from what is left of the screen, and in landscape the
-    // keyboard is most of it.
+    // The column pays the top and the sides, and the bottom row pays the bottom, keyboard included.
+    // `safeDrawing` counts the IME, and the file row takes its height from what is left of the
+    // screen, so padding the whole column with it would shrink the row the instant the keyboard
+    // came up.
     Column(
         Modifier
             .fillMaxSize()
@@ -385,18 +368,14 @@ private fun Editor(opened: Uri? = null) {
             }
             .windowInsetsPadding(safe.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
     ) {
-        // What a file is — opening one, starting one, writing one out, which one is open — is not
-        // what anyone needs mid-sentence, so the row, the name and the rule under them all go while
-        // the keyboard is up and give the screen they were taking to the text. Asking the IME inset
-        // for its height rather than asking whether a field holds focus is what makes them follow
-        // the keyboard itself: dismissing the keyboard with Back brings them back without touching
-        // the cursor.
+        // What a file is — which one is open, opening one, saving one — is not what anyone needs
+        // mid-sentence, so the row, the name and the rule under them go while the keyboard is up.
+        // Asking the IME inset rather than whether a field holds focus makes them follow the
+        // keyboard itself: dismissing it with Back brings them back without touching the cursor.
         //
-        // The three share the width between them and the row is a seventh of the shorter edge tall.
-        // Measuring the edge here rather than asking the configuration for it is what keeps that
-        // right in landscape and beside a cutout, where the padding above has already taken its
-        // share; taking the shorter of the two is what stops the row being a quarter of the screen
-        // in landscape, where the width is more than twice the height.
+        // The edge is measured here rather than asked of the configuration, so the padding above
+        // has already taken its share in landscape and beside a cutout; the shorter one, so the row
+        // is not a quarter of the screen in landscape.
         if (!typing) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth().height(minOf(maxWidth, maxHeight) / ROW_SHARE)) {
@@ -406,15 +385,11 @@ private fun Editor(opened: Uri? = null) {
                 }
             }
         }
-        // The name and its rule are the exception, for as long as what the bar is saying holds them
-        // over the keyboard — see [Hold]. They push the text down rather than cover it, so the
-        // cursor can never be under them.
+        // The name and its rule stay over the keyboard for as long as [Hold] says. They push the
+        // text down rather than cover it, so the cursor can never be under them.
         if (!typing || notice.holding) {
-            // A pixel above and a pixel below and nothing else, so the row is as tall as the
-            // sentence in it and no taller. It is not a control and it should not be given the room
-            // of one: it says which file this is, or what just happened to it, and it is aligned
-            // with the text below rather than with the buttons above because it is something to
-            // read.
+            // A pixel above and below and nothing else: it is something to read rather than a
+            // control, so it is as tall as its sentence and aligned with the text below.
             Text(notice.text, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = pixel))
             // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at
             // that width the rule reads as a bar across the screen rather than as a line under the
@@ -426,20 +401,17 @@ private fun Editor(opened: Uri? = null) {
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
         )
         HorizontalDivider(thickness = pixel)
-        // These are what is wanted mid-sentence — what they undo is the sentence being typed, and
-        // saving is what ends it — so they sit at the bottom and ride on top of the keyboard. This
-        // row is what sits against the keyboard, so it is the one that pays the bottom inset.
+        // What these undo is the sentence being typed, and saving ends it, so this row rides on top
+        // of the keyboard and pays the bottom inset.
         //
-        // Material pads every button out to a 48dp touch target, and in landscape with the keyboard
-        // up that padding is taken straight from the few lines of text left. Turning it off here
-        // lets [OP_HEIGHT] be the whole of the row.
+        // Material pads every button out to a 48dp touch target, which in landscape with the
+        // keyboard up comes straight out of the few lines of text left. Turning it off lets
+        // [OP_HEIGHT] be the whole of the row.
         CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
             Row(
                 Modifier.fillMaxWidth().windowInsetsPadding(safe.only(WindowInsetsSides.Bottom)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Select all works on the document and not on the window, which is the only way it
-                // could work: the field holds a few kilobytes of whatever is open.
                 Op("All") { scope.launch { document.selectAll() } }
                 Op("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
                 Op("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
@@ -479,35 +451,21 @@ private fun Editor(opened: Uri? = null) {
 }
 
 /**
- * How much of the shorter edge the file row is tall: a seventh of it, about 58dp on a phone 411dp wide.
- *
- * It used to be a share per button, so that a button came out square. That was right while the row
- * held seven and then six, and it stopped being right at four, where a square is 103dp and most of
- * what the row shows is the black around the word. Height and count are separate questions and
- * this is the answer to the height one: a seventh of the shorter edge is a comfortable touch row,
- * comfortably over the 48dp the platform asks for, and it is the height the row had when it was
- * seven squares. Tying it to a fraction rather than to a count also means taking a button out of
- * the row no longer makes the row taller, which is a strange thing for a row to do.
+ * How much of the shorter edge the file row is tall: a seventh, about 58dp on a phone and over the
+ * 48dp the platform asks for. A fraction rather than a share per button, so the row's height does
+ * not depend on how many buttons it holds.
  */
 private const val ROW_SHARE = 7
 
 /**
- * One button on the file row: an equal share of the width, however many there are.
+ * One button on the file row: an equal share of the width, however many there are. A weight is a
+ * fixed constraint, so Material's minimum button width never applies.
  *
- * The row hands out its width by weight, so nothing is left over at the end of it and no number
- * here was chosen against any one phone. Material's own sizing does not enter into it: a weight is a
- * fixed constraint, so the 58dp minimum width that used to push the last button off the screen
- * never applies.
+ * Squared off rather than Material's pill, since the ripple is cut to the shape and a round ripple
+ * inside a rectangular target reads as a smaller target than it is.
  *
- * The shape is squared off rather than the pill Material gives a text button, since the pill is
- * what the ripple is cut to and a round ripple inside a rectangular target reads as a smaller
- * target than the target is.
- *
- * The type is a step down from the `labelLarge` a button would otherwise take, and that is the
- * widest label's doing: at full size "Save as" is wider than a square and wraps, which leaves one
- * button two lines tall among six that are one. A step down puts every label on its own line. Two
- * lines are still allowed rather than clipped, so a system font turned right up wraps and stays
- * readable instead of losing its ends.
+ * Two lines are allowed rather than clipped, so a system font turned right up wraps and stays
+ * readable.
  */
 @Composable
 private fun RowScope.Tool(label: String, enabled: Boolean = true, onClick: () -> Unit) {

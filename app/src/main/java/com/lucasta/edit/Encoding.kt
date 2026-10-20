@@ -5,9 +5,7 @@ import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
 
 /**
- * What a file is written in, and everything that follows from that. Pure Kotlin with no Android in
- * it, along with [Pieces], [Chunks] and [Slice]: between them they are where a mistake corrupts a
- * file quietly rather than crashing, so they are kept free of anything Android.
+ * What a file is written in, and everything that follows from that.
  *
  * [unitBytes] is the size of a code unit, one for UTF-8 and two for UTF-16. It is what a line break
  * has to be looked for in — in UTF-16 a byte 0x0A is only sometimes a line break, and the other
@@ -28,8 +26,6 @@ enum class Encoding(val charset: Charset, val bom: ByteArray, val unitBytes: Int
      * [encode] on every input rather than on well-formed input — including an unpaired surrogate,
      * which cannot be represented at all and which the encoder therefore replaces: with one byte in
      * UTF-8, and with one two-byte unit in UTF-16, which is what the arithmetic here says too.
-     * Being exact everywhere is what lets the map from characters to bytes carry no entry at all
-     * for ordinary text and mark only the places where the file itself would not decode.
      */
     fun encodedLength(text: CharSequence, from: Int, to: Int): Int {
         if (unitBytes == 2) return (to - from) * 2
