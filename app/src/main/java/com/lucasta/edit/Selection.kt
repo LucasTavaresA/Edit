@@ -1,0 +1,486 @@
+package com.lucasta.edit
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.OverscrollEffect
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.scrollable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.magnifier
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameMillis
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+
+/**
+ * How much a copy may put on the clipboard, in the document's bytes. What is copied crosses into
+ * the system and back out to whoever pastes it in single binder transactions, and each process has
+ * about a megabyte for everything it has in flight at once. Text crosses as UTF-8 or as UTF-16
+ * depending on who is carrying it, and either way takes at most two bytes for each of the
+ * document's, so this keeps every crossing within half of that megabyte; only a byte the encoding
+ * could not name, carried as a replacement, takes three. Anything larger is refused, and cutting it
+ * is too, rather than cut short: a clipboard holding part of what was asked for looks exactly like
+ * one holding all of it, until it is pasted.
+ *
+ * Measured on a phone, twice this is already at the edge: the system hands a clip on to the
+ * vendor's clipboard at two bytes a character. A megabyte is taken in and cannot be read back out.
+ */
+private const val CLIP_MAX = 256 * 1024
+
+/** How near the top or bottom edge a drag has to come before the text scrolls under it, at most. */
+private val EDGE = 40.dp
+
+/** How big a handle is drawn, the size of the platform's own. */
+private val HANDLE = 25.dp
+
+/** How far past a handle a touch still takes hold of it, on every side. */
+private val GRAB = 12.dp
+
+/**
+ * Everything a touch does to the text: tapping, scrolling, long-pressing a word, and dragging the
+ * ends of a selection. It lies over the rows and takes every touch before they can, the window's
+ * field included, which only ever hears from the keyboard.
+ *
+ * A selection belongs to the document rather than to a text field — see [DocumentState.marked] —
+ * so the platform's handles, magnifier and menu, which belong to a field and reach no further than
+ * one, are replaced here: the handles are drawn over the rows, the magnifier is the platform's own
+ * widget pointed at them, and the menu is the platform's floating toolbar, asked for directly.
+ *
+ * The list scrolls under it through [scrollable], which is what the list itself would have done
+ * with the touch, and with the list's own [overscroll].
+ */
+@Composable
+internal fun SelectionLayer(
+    state: DocumentState,
+    list: LazyListState,
+    overscroll: OverscrollEffect?,
+    clip: Clip,
+    modifier: Modifier = Modifier,
+) {
+    val handles = LocalTextSelectionColors.current.handleColor
+    val toolbar = LocalTextToolbar.current
+    val haptics = LocalHapticFeedback.current
+    val placed = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    var pressed by remember { mutableStateOf(false) }
+    var dragging by remember { mutableStateOf(false) }
+    // The field's cursor as it was when the menu that offers to paste was asked for at it, and
+    // null when it was not, or the cursor has moved since.
+    var cursorMenu by remember { mutableStateOf<TextRange?>(null) }
+
+    LaunchedEffect(state) {
+        snapshotFlow { state.window.selection }.collect { if (it != cursorMenu) cursorMenu = null }
+    }
+    // The menu is shown for as long as there is something for it to act on and nothing is moving
+    // under it: it is put away while a finger is down or the list is scrolling, and comes back
+    // where the selection has got to once they stop. A selection the keyboard made or moved has
+    // none; see [DocumentState.touched].
+    LaunchedEffect(state, list, toolbar) {
+        snapshotFlow {
+            when {
+                pressed || list.isScrollInProgress -> null
+                state.marked != null -> if (state.touched) selectionRect(state, list)?.let { it to true } else null
+                cursorMenu != null -> state.cursorCaret()?.let { it to false }
+                else -> null
+            }
+        }.collect { menu ->
+            val where = placed[0]?.takeIf { it.isAttached }
+            if (menu == null || where == null) {
+                toolbar.hide()
+                return@collect
+            }
+            val (rect, selection) = menu
+            val root = Rect(where.localToRoot(rect.topLeft), rect.size)
+            val paste = if (clip.hasText) ({ clip.paste(); cursorMenu = null }) else null
+            if (selection) {
+                toolbar.showMenu(
+                    rect = root,
+                    onCopyRequested = { if (clip.copy()) state.deselect() },
+                    onPasteRequested = paste,
+                    onCutRequested = { clip.cut() },
+                    onSelectAllRequested = { state.selectAll() },
+                )
+            } else {
+                toolbar.showMenu(
+                    rect = root,
+                    onPasteRequested = paste,
+                    onSelectAllRequested = {
+                        cursorMenu = null
+                        state.selectAll()
+                    },
+                )
+            }
+        }
+    }
+    DisposableEffect(toolbar) { onDispose { toolbar.hide() } }
+
+    Box(
+        modifier
+            .onPlaced { placed[0] = it }
+            .magnifier(
+                sourceCenter = {
+                    val end = state.marked?.end
+                    val caret = if (dragging && end != null) state.caretAt(end) else null
+                    if (caret == null || caret.top < 0f) Offset.Unspecified else Offset(caret.left, caret.center.y)
+                },
+            )
+            .drawBehind {
+                val mark = state.marked?.takeIf { state.touched } ?: return@drawBehind
+                state.caretAt(mark.min)?.takeIf { it.bottom > 0f && it.top < size.height }?.let { handle(it, true, handles) }
+                state.caretAt(mark.max)?.takeIf { it.bottom > 0f && it.top < size.height }?.let { handle(it, false, handles) }
+            }
+            // A finger moves with the text, not with the viewport, which is the other way round to
+            // how the list counts, as it would have told its own scrollable.
+            .scrollable(list, Orientation.Vertical, overscroll, reverseDirection = true)
+            // After the scrollable, so that it sees every touch first and takes the ones that are
+            // a handle or a long press before the scrollable can take them for a scroll.
+            .pointerInput(state, list) {
+                coroutineScope {
+                    val scope = this
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        pressed = true
+                        try {
+                            val grip = gripAt(state, down.position, size.height.toFloat())
+                            if (grip != null) {
+                                down.consume()
+                                dragging = true
+                                carry(down, scope, list) { finger ->
+                                    val spot = state.spotAt(finger + grip.offset) ?: return@carry
+                                    val at = state.offsetOf(spot)
+                                    if (at != grip.fixed && at != state.marked?.end) {
+                                        state.mark(TextRange(grip.fixed, at), park = false)
+                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
+                                }
+                                state.park()
+                                return@awaitEachGesture
+                            }
+                            when (press(down)) {
+                                Press.Scroll -> Unit
+                                Press.Tap -> {
+                                    val spot = state.spotAt(down.position) ?: return@awaitEachGesture
+                                    // Tapping the cursor where it already is asks for the menu that
+                                    // offers to paste, as in any text field, and tapping it again
+                                    // puts the menu away.
+                                    val again = spot.slice == null && state.marked == null &&
+                                        state.window.selection == TextRange(spot.char)
+                                    scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                        state.tap(spot)
+                                        cursorMenu = if (again && cursorMenu == null) state.window.selection else null
+                                    }
+                                }
+                                Press.Long -> {
+                                    val spot = state.spotAt(down.position) ?: return@awaitEachGesture
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    val word = wordAt(spot.text, spot.char)
+                                    if (word.collapsed) {
+                                        // Nothing to select: the cursor goes there, with the menu
+                                        // that offers to paste.
+                                        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                            state.tap(spot)
+                                            cursorMenu = state.window.selection
+                                        }
+                                        return@awaitEachGesture
+                                    }
+                                    val anchor = TextRange(state.offsetOf(spot, word.start), state.offsetOf(spot, word.end))
+                                    state.mark(anchor)
+                                    dragging = true
+                                    // Dragging on from a long press carries the selection a word at
+                                    // a time, and keeps the word it started on.
+                                    carry(down, scope, list) { finger ->
+                                        val at = state.spotAt(finger) ?: return@carry
+                                        val near = wordAt(at.text, at.char)
+                                        val from = state.offsetOf(at, near.start)
+                                        val to = state.offsetOf(at, near.end)
+                                        val range = when {
+                                            to > anchor.max -> TextRange(anchor.min, to)
+                                            from < anchor.min -> TextRange(anchor.max, from)
+                                            else -> anchor
+                                        }
+                                        if (range != state.marked) {
+                                            state.mark(range, park = false)
+                                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        }
+                                    }
+                                    state.park()
+                                }
+                            }
+                        } finally {
+                            pressed = false
+                            dragging = false
+                        }
+                    }
+                }
+            },
+    )
+}
+
+/** What a touch that is not on a handle turns out to be. */
+private enum class Press { Tap, Long, Scroll }
+
+/**
+ * Lifted soon enough is a tap, held still long enough is a long press, and moved first is a
+ * scroll, which is the list's: nothing is consumed here, so the scrollable takes it as its own.
+ */
+private suspend fun AwaitPointerEventScope.press(down: PointerInputChange): Press {
+    var press = Press.Long
+    withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+        while (true) {
+            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+            if (change == null) {
+                press = Press.Scroll
+                break
+            }
+            if (change.changedToUpIgnoreConsumed()) {
+                press = Press.Tap
+                break
+            }
+            if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                press = Press.Scroll
+                break
+            }
+        }
+    }
+    return press
+}
+
+/**
+ * Follows the pointer that went [down] until it lifts, handing [follow] each place it moves to,
+ * and scrolls the text under it while it is held near the top or bottom edge, handing [follow] the
+ * same place again as the text moves. Every move is taken, so the list never sees one as a scroll.
+ */
+private suspend fun AwaitPointerEventScope.carry(
+    down: PointerInputChange,
+    scope: CoroutineScope,
+    list: LazyListState,
+    follow: (Offset) -> Unit,
+) {
+    var finger = down.position
+    val edge = EDGE.toPx()
+    val slop = viewConfiguration.touchSlop
+    val scrolling = scope.launch {
+        var since = 0L
+        // An edge scrolls only once the finger has been carried into it, never because the drag
+        // began there: a long press on the first or last line on screen would otherwise set the
+        // text moving under a finger that has not moved at all.
+        var top = false
+        var bottom = false
+        while (true) {
+            val now = withFrameMillis { it }
+            val height = size.height.toFloat()
+            // Landscape with the keyboard up leaves a few lines, which would otherwise be mostly edge.
+            val zone = minOf(edge, height / 5)
+            if (finger.y >= zone || finger.y < down.position.y - slop) top = true
+            if (finger.y <= height - zone || finger.y > down.position.y + slop) bottom = true
+            val beyond = when {
+                top && finger.y < zone -> finger.y - zone
+                bottom && finger.y > height - zone -> finger.y - (height - zone)
+                else -> 0f
+            }
+            if (beyond == 0f) {
+                since = 0L
+                continue
+            }
+            if (since == 0L) since = now
+            // Faster the deeper into the edge, and faster again the longer it is held there, so
+            // that going a long way is not a long wait.
+            val held = (1 + (now - since) / 1000f).coerceAtMost(10f)
+            list.scrollBy((beyond / zone).coerceIn(-3f, 3f) * zone / 2 * held)
+            follow(finger)
+        }
+    }
+    try {
+        while (true) {
+            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+            if (change.changedToUpIgnoreConsumed()) break
+            change.consume()
+            finger = change.position
+            follow(finger)
+        }
+    } finally {
+        scrolling.cancel()
+    }
+}
+
+/**
+ * A handle taken hold of: the end of the selection that stays put while it is dragged, and how far
+ * the place it points at is from the finger, which keeps it pointing there rather than under the
+ * finger, where nobody could see it.
+ */
+private class Grip(val fixed: Int, val offset: Offset)
+
+/**
+ * The handle a touch at [at] takes hold of, or null; the nearer one when they overlap. Only a
+ * handle drawn on screen, which is [height] tall, can be taken hold of.
+ */
+private fun Density.gripAt(state: DocumentState, at: Offset, height: Float): Grip? {
+    val mark = state.marked?.takeIf { state.touched } ?: return null
+    var grip: Grip? = null
+    var nearest = Float.MAX_VALUE
+    for (start in booleanArrayOf(true, false)) {
+        val caret = state.caretAt(if (start) mark.min else mark.max)
+            ?.takeIf { it.bottom > 0f && it.top < height } ?: continue
+        val area = handleArea(caret, start).inflate(GRAB.toPx())
+        val distance = (area.center - at).getDistance()
+        if (!area.contains(at) || distance >= nearest) continue
+        nearest = distance
+        grip = Grip(if (start) mark.max else mark.min, Offset(caret.left, caret.center.y) - at)
+    }
+    return grip
+}
+
+/**
+ * Where a handle hangs from the bottom of [caret], pointing up at it: the start of a selection
+ * hangs to the left of where it starts, the end to the right of where it ends.
+ */
+private fun Density.handleArea(caret: Rect, start: Boolean): Rect {
+    val size = HANDLE.toPx()
+    val left = if (start) caret.left - size else caret.left
+    return Rect(left, caret.bottom, left + size, caret.bottom + size)
+}
+
+/** The platform's teardrop: a circle with the corner nearest the text squared off to point at it. */
+private fun DrawScope.handle(caret: Rect, start: Boolean, color: Color) {
+    val area = handleArea(caret, start)
+    val radius = area.width / 2
+    drawCircle(color, radius, area.center)
+    drawRect(color, Offset(if (start) area.center.x else area.left, area.top), Size(radius, radius))
+}
+
+/**
+ * Where the menu for the selection goes: around the part of it on screen, in the list's own
+ * coordinates, or null when none of it is. An end that is off screen counts as the edge it is
+ * beyond.
+ */
+private fun selectionRect(state: DocumentState, list: LazyListState): Rect? {
+    val mark = state.marked ?: return null
+    val size = list.layoutInfo.viewportSize
+    val height = size.height.toFloat()
+    val first = state.caretAt(mark.min)
+    val last = state.caretAt(mark.max)
+    val top = (first?.top ?: if (mark.min < state.visibleFrom) 0f else return null).coerceAtLeast(0f)
+    val bottom = (last?.bottom ?: if (mark.max > state.visibleFrom) height else return null).coerceAtMost(height)
+    if (top >= bottom) return null
+    return if (first != null && last != null && first.top == last.top) Rect(first.left, top, last.left, bottom)
+    else Rect(0f, top, size.width.toFloat(), bottom)
+}
+
+/** What a long press selects: the run of word characters under it, or nothing if there is none. */
+private fun wordAt(text: CharSequence, offset: Int): TextRange {
+    var start = offset
+    var end = offset
+    while (start > 0 && isWord(text[start - 1])) start--
+    while (end < text.length && isWord(text[end])) end++
+    return TextRange(start, end)
+}
+
+/** What a word is made of, for a long press and for a step a word at a time alike. */
+internal fun isWord(char: Char) = char.isLetterOrDigit() || char == '_'
+
+/**
+ * The clipboard, as the editor's selection uses it. Copying and cutting refuse a selection over
+ * [CLIP_MAX], and say so through [refuse]; [typing] says whether the keyboard is up, which a cut or
+ * a paste keeps it.
+ */
+internal class Clip(
+    private val state: DocumentState,
+    private val context: Context,
+    private val refuse: (String) -> Unit,
+    private val typing: () -> Boolean,
+) {
+    private val clipboard = context.getSystemService(ClipboardManager::class.java)
+
+    /** Whether there is text to paste, asked without reading it, which the system would announce. */
+    val hasText: Boolean
+        get() = clipboard?.primaryClipDescription?.hasMimeType("text/*") == true
+
+    /** Copies the selection, and answers whether it did. */
+    fun copy(): Boolean = put("copy")
+
+    /** Copies the selection and takes it out, or does neither. */
+    fun cut() {
+        if (put("cut")) state.cut(typing())
+    }
+
+    fun paste() {
+        val clip = try {
+            clipboard?.primaryClip
+        } catch (e: RuntimeException) {
+            // Another app can put more on the clipboard than the system can hand back to anyone,
+            // and asking for it then fails as if the system had died.
+            refuse("could not paste: the clipboard holds more than it can hand over")
+            null
+        }?.takeIf { it.itemCount > 0 } ?: return
+        val text = clip.getItemAt(0).coerceToText(context)?.toString()
+        if (text.isNullOrEmpty()) return
+        state.paste(text, typing())
+    }
+
+    private fun put(verb: String): Boolean {
+        val clipboard = clipboard ?: return false
+        val bytes = state.marked?.length ?: return false
+        if (bytes > CLIP_MAX) {
+            refuse("could not $verb: ${bytes.toLong().readable()}, over the ${CLIP_MAX.toLong().readable()} limit")
+            return false
+        }
+        val text = state.markedText() ?: return false
+        return try {
+            clipboard.setPrimaryClip(ClipData.newPlainText(null, text))
+            true
+        } catch (e: RuntimeException) {
+            // The system refusing a clip too large to carry, which the limit is there to prevent.
+            refuse("could not $verb: the clipboard would not take ${bytes.toLong().readable()}")
+            false
+        }
+    }
+}
+
+@Composable
+internal fun rememberClip(state: DocumentState, refuse: (String) -> Unit): Clip {
+    val context = LocalContext.current
+    val ime = WindowInsets.ime
+    val density = LocalDensity.current
+    val refusal by rememberUpdatedState(refuse)
+    return remember(state, context, ime, density) {
+        Clip(state, context, { refusal(it) }) { ime.getBottom(density) > 0 }
+    }
+}

@@ -399,6 +399,7 @@ private fun Editor(opened: Uri? = null) {
         DocumentEditor(
             state = document,
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
+            refuse = { say(it, Hold.UntilSeen) },
         )
         HorizontalDivider(thickness = pixel)
         // What these undo is the sentence being typed, and saving ends it, so this row rides on top
@@ -412,7 +413,7 @@ private fun Editor(opened: Uri? = null) {
                 Modifier.fillMaxWidth().windowInsetsPadding(safe.only(WindowInsetsSides.Bottom)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Op("All") { scope.launch { document.selectAll() } }
+                Op("All") { document.selectAll() }
                 Op("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
                 Op("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
                 Op("Save", enabled = file != null) { save() }
