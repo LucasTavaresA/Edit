@@ -144,9 +144,15 @@ internal fun ByteArray.startsWith(prefix: ByteArray): Boolean =
 internal fun sniffEncoding(bytes: ByteArray): Encoding =
     Encoding.entries.firstOrNull { it.bom.isNotEmpty() && bytes.startsWith(it.bom) } ?: Encoding.Utf8
 
+/**
+ * What [uri] is called. Asking the provider can fail outright, for a file whose access has gone
+ * among others, and a name is never worth failing for: the link's own last segment stands in.
+ */
 fun displayName(context: Context, uri: Uri): String {
-    val name = context.contentResolver
-        .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-        ?.use { if (it.moveToFirst()) it.getString(0) else null }
+    val name = runCatching {
+        context.contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { if (it.moveToFirst()) it.getString(0) else null }
+    }.getOrNull()
     return name ?: uri.lastPathSegment ?: uri.toString()
 }

@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
@@ -9,9 +10,10 @@
         <!--
             Every configuration change we can take ourselves is taken, because the alternative is
             the activity being rebuilt, and nothing can restore the open document: its descriptor
-            and pieces do not fit a saved instance state, and no permission is held that would let
-            the file be opened again. Nothing is read outside composition, so Compose sees the new
-            configuration and lays out again on its own.
+            and pieces do not fit a saved instance state, and opening the file again, all a rebuild
+            can do, loses the unsaved edits and cannot reach a file whose access ended with the
+            process. Nothing is read outside composition, so Compose sees the new configuration
+            and lays out again on its own.
         -->
         <!--
             The keyboard must arrive as an inset and never as a shove. Left unsaid, the system

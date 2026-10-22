@@ -1,5 +1,7 @@
 package com.lucasta.edit
 
+import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -77,10 +79,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val bars = SystemBarStyle.auto(ArgbColor.TRANSPARENT, ArgbColor.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
+        // A rebuilt activity is handed the intent it was first started with, which no longer says
+        // what is open. The file kept for the next start does, and handed nothing, that is opened.
         val opened = when (intent?.action) {
             Intent.ACTION_VIEW, Intent.ACTION_EDIT -> intent.data
             else -> null
-        }
+        }.takeIf { savedInstanceState == null }
         setContent {
             // The bar icons are set once, against the mode in force at the time, and the activity
             // is no longer rebuilt when that mode changes — so they are set again when it does.
@@ -211,6 +215,65 @@ private class Notice(val text: String, val hold: Hold) {
  */
 private val turns = Mutex()
 
+/**
+ * Where the file kept for the next start is written down. Only its link and its name are, so what
+ * comes back is the file as it stands by then, and edits not saved before Edit stopped are not
+ * part of it.
+ */
+private const val LAST = "last"
+
+/**
+ * The file that was open when Edit last stopped, and what it was called. The name is kept because
+ * it cannot be asked for once the file's access has gone, which is exactly when it needs saying.
+ */
+private class LastFile(val uri: Uri, val name: String)
+
+/** The file that was open when Edit last stopped, or null if none was or it could not be kept. */
+private fun lastFile(context: Context): LastFile? {
+    val last = context.getSharedPreferences(LAST, Context.MODE_PRIVATE)
+    val uri = last.getString("file", null) ?: return null
+    return LastFile(Uri.parse(uri), last.getString("name", null) ?: uri)
+}
+
+/**
+ * Keeps [uri], called [name], as the file the next start opens, or nothing when there is no file or
+ * its access cannot outlive the process. Open and Save as hand over access that can be kept;
+ * another app handing a file over usually does not, and then the next start opens nothing rather
+ * than a file older than the last one. The only grant held is the kept file's, so the one before
+ * is let go.
+ */
+private fun keepLastFile(context: Context, uri: Uri?, name: String) {
+    val resolver = context.contentResolver
+    val kept = uri?.takeIf { resolver.keepAccess(it) }
+    for (held in resolver.persistedUriPermissions) {
+        if (held.uri == kept) continue
+        val read = if (held.isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0
+        val write = if (held.isWritePermission) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0
+        // One that will not let go is only one more grant held, and never worth stopping for.
+        runCatching { resolver.releasePersistableUriPermission(held.uri, read or write) }
+    }
+    context.getSharedPreferences(LAST, Context.MODE_PRIVATE).edit()
+        .putString("file", kept?.toString())
+        .putString("name", kept?.let { name })
+        .apply()
+}
+
+/**
+ * Whether the access kept to [uri] is still held. A provider lets go of it once the file is
+ * deleted, and after that the file cannot be opened or even named.
+ */
+private fun ContentResolver.holdsAccess(uri: Uri): Boolean = persistedUriPermissions.any { it.uri == uri }
+
+/**
+ * Keeps access to [uri] past the process, writing included where that was given, and says whether
+ * it could. Asking for more than was given is refused outright, hence reading alone after.
+ */
+private fun ContentResolver.keepAccess(uri: Uri): Boolean {
+    val read = Intent.FLAG_GRANT_READ_URI_PERMISSION
+    val write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    return listOf(read or write, read).any { runCatching { takePersistableUriPermission(uri, it) }.isSuccess }
+}
+
 @Composable
 private fun Editor(opened: Uri? = null) {
     val context = LocalContext.current
@@ -321,7 +384,22 @@ private fun Editor(opened: Uri? = null) {
         }
     }
 
-    LaunchedEffect(opened) { opened?.let { inTurn { load(it) } } }
+    // A file handed over is opened, and otherwise the one open when Edit last stopped. Once that has
+    // had its turn, the file kept follows whichever is open, so one that could not be opened again
+    // is forgotten rather than tried at every start, and New leaves nothing to come back to.
+    LaunchedEffect(opened) {
+        turns.withLock {
+            val last = if (opened == null) lastFile(context) else null
+            when {
+                opened != null -> load(opened)
+                last == null -> {}
+                !context.contentResolver.holdsAccess(last.uri) ->
+                    say("could not open ${last.name}: it is gone", Hold.UntilSeen)
+                else -> load(last.uri)
+            }
+        }
+        snapshotFlow { file to name }.collect { (uri, called) -> keepLastFile(context, uri, called) }
+    }
 
     val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
         picked ?: return@rememberLauncherForActivityResult
