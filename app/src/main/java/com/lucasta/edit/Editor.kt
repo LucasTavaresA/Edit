@@ -758,7 +758,7 @@ class DocumentState(spill: File?) : Closeable {
                 return now.subSequence(held.min, end)
             }
         }
-        val change = change(was, now) ?: return ""
+        val change = change(was, now, window.selection.max) ?: return ""
         return now.subSequence(change.from, change.now)
     }
 
@@ -1032,7 +1032,7 @@ class DocumentState(spill: File?) : Closeable {
     private fun record() {
         if (windowStart < 0) return
         val now = window.text
-        val change = change(windowSlice.text, now) ?: return
+        val change = change(windowSlice.text, now, window.selection.max) ?: return
         val from = windowStart + windowSlice.byteAt(change.from)
         val to = windowStart + windowSlice.byteAt(change.was)
         val typed = content.encoding.encode(now, change.from, change.now)

@@ -184,22 +184,34 @@ class Change(val from: Int, val was: Int, val now: Int)
 
 /**
  * What changed between what a window was given and what it holds now, or null if nothing did.
+ * [cursor] is where the field's cursor stands in [now].
  *
  * The answer is the run the typing actually touched and not the whole window. A window is a few
  * thousand bytes of which almost none was typed, and committing all of it would fill the typed
  * buffer with text nobody typed and leave the file's own bytes for that run behind.
  *
+ * A run put in or taken out next to text that repeats it could have gone in or come out anywhere
+ * along the repeat, and every one of those answers leaves the same text, but it is also where undo
+ * puts the cursor back. A paste of what follows the cursor would otherwise be told as one at the
+ * far end of the repeat, which can be the window's own end. The one taken is the one ending at the
+ * cursor: typing and pasting leave it after what they put in, and deleting either way leaves it
+ * where the text came out.
+ *
  * Neither end may fall between the halves of a surrogate pair, since either half on its own encodes
  * to a replacement rather than to itself.
  */
-fun change(was: CharSequence, now: CharSequence): Change? {
+fun change(was: CharSequence, now: CharSequence, cursor: Int): Change? {
     val shortest = minOf(was.length, now.length)
     var prefix = 0
     while (prefix < shortest && was[prefix] == now[prefix]) prefix++
     if (prefix == was.length && was.length == now.length) return null
+    var common = 0
+    while (common < shortest && was[was.length - 1 - common] == now[now.length - 1 - common]) common++
+    // Overlapping, the two say the change is only a run put in or taken out, and every start between
+    // them is that same run slid along the repeat.
+    if (prefix + common >= shortest) prefix = (cursor - (now.length - shortest)).coerceIn(shortest - common, prefix)
     if (prefix in 1 until was.length && was[prefix].isLowSurrogate() && was[prefix - 1].isHighSurrogate()) prefix--
-    var suffix = 0
-    while (suffix < shortest - prefix && was[was.length - 1 - suffix] == now[now.length - 1 - suffix]) suffix++
+    var suffix = minOf(common, shortest - prefix)
     if (suffix > 0 && was.length - suffix > 0 &&
         was[was.length - suffix].isLowSurrogate() && was[was.length - suffix - 1].isHighSurrogate()
     ) suffix--
