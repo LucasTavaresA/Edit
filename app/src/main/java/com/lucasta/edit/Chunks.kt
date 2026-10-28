@@ -35,28 +35,50 @@ private const val LINE_FEED = 0x0A
 private const val SPACE = 0x20
 
 /**
- * Byte offsets of the chunk starts covering [from] to [to], always beginning with [from]. An empty
- * range is one empty chunk.
+ * The chunk index: where each chunk starts in bytes, [starts], and in characters, [chars], which is
+ * how many characters come before it and where it starts as a keyboard counts. [chars] has one entry
+ * more than [starts], for where everything indexed ends, so every chunk has an end in both.
+ *
+ * A chunk's characters are what decoding it on its own makes, the way a row draws it, and that is
+ * also what decoding any run of whole chunks makes: no chunk boundary falls inside a character, and
+ * a byte the decoder cannot name is one character of its own wherever the cut is.
  */
-fun chunkStarts(source: Bytes, from: Int, to: Int, encoding: Encoding): IntArray {
-    if (to <= from) return intArrayOf(from)
+class Index(val starts: IntArray, val chars: IntArray)
+
+/**
+ * The index of the chunks covering [from] to [to], always beginning with [from], and counting
+ * characters on from [before], which is how many come before [from]. An empty range is one empty
+ * chunk.
+ */
+fun chunkStarts(source: Bytes, from: Int, to: Int, encoding: Encoding, before: Int = 0): Index {
+    if (to <= from) return Index(intArrayOf(from), intArrayOf(before, before))
     val target = CHUNK_TARGET * encoding.unitBytes
     val max = CHUNK_MAX * encoding.unitBytes
     var starts = IntArray((to - from) / target + 2)
+    var chars = IntArray(starts.size + 1)
     var count = 0
+    var counted = before
     var window = ByteArray(0)
     var base = from
     var at = from
     do {
-        if (count == starts.size) starts = starts.copyOf(starts.size * 2)
-        starts[count++] = at
+        if (count == starts.size) {
+            starts = starts.copyOf(starts.size * 2)
+            chars = chars.copyOf(starts.size + 1)
+        }
+        starts[count] = at
+        chars[count++] = counted
         if (at < base || (at + max > base + window.size && base + window.size < to)) {
             base = at
             window = source.read(base, minOf(base + SCAN, to))
         }
-        at = chunkEnd(window, base, at, to, target, max, encoding)
+        val end = chunkEnd(window, base, at, to, target, max, encoding)
+        // Counted off the bytes already read to find the end, so knowing it costs no second pass.
+        counted += encoding.decodedLength(window, at - base, end - base)
+        at = end
     } while (at < to)
-    return starts.copyOf(count)
+    chars[count] = counted
+    return Index(starts.copyOf(count), chars.copyOf(count + 1))
 }
 
 /**
@@ -158,42 +180,55 @@ private fun boundaryAt(window: ByteArray, at: Int, floor: Int, encoding: Encodin
  * The span is widened to whole chunks first. What the window commits is the run of bytes it
  * actually changed, which starts and ends wherever the typing did, and re-indexing from there would
  * put a chunk boundary in the middle of a line.
+ *
+ * The chunks after it have moved in characters too, by however many the indexed span gained.
  */
 fun respan(
-    chunks: IntArray,
+    index: Index,
     start: Int,
     end: Int,
     delta: Int,
     source: Bytes,
     encoding: Encoding,
     length: Int,
-): IntArray {
+): Index {
+    val chunks = index.starts
+    val chars = index.chars
     val was = length - delta
     val head = chunkIndexAt(chunks, start)
     val from = chunks[head]
     val tail = chunkIndexAt(chunks, maxOf(end, start).coerceAtMost(was))
     val to = chunkEndAt(chunks, tail, was)
-    val middle = chunkStarts(source, from, to + delta, encoding)
+    val middle = chunkStarts(source, from, to + delta, encoding, chars[head])
     // Sized to the answer rather than to the index, because this runs on every commit and on a
     // document of any size the index is the largest thing around: a spare copy of it per keystroke
     // is megabytes of garbage for nothing.
     val after = if (to >= was) chunks.size else tail + 1
-    val out = IntArray(head + middle.size + (chunks.size - after))
+    // Where [to] was in characters is where chunk [after] started, or the end when there is none.
+    val shift = middle.chars.last() - chars[after]
+    val out = IntArray(head + middle.starts.size + (chunks.size - after))
+    val outChars = IntArray(out.size + 1)
     var count = 0
-    for (index in 0 until head) out[count++] = chunks[index]
-    for (offset in middle) count = push(out, count, offset, length)
-    for (index in after until chunks.size) count = push(out, count, chunks[index] + delta, length)
-    if (count == 0) return intArrayOf(0)
-    return if (count == out.size) out else out.copyOf(count)
+    for (at in 0 until head) {
+        out[count] = chunks[at]
+        outChars[count++] = chars[at]
+    }
+    for (at in middle.starts.indices) count = push(out, outChars, count, middle.starts[at], middle.chars[at], length)
+    for (at in after until chunks.size) count = push(out, outChars, count, chunks[at] + delta, chars[at] + shift, length)
+    if (count == 0) return Index(intArrayOf(0), intArrayOf(0, 0))
+    outChars[count] = chars.last() + shift
+    return if (count == out.size) Index(out, outChars) else Index(out.copyOf(count), outChars.copyOf(count + 1))
 }
 
 /**
  * Chunk starts stay strictly increasing and stay inside the document, so that no chunk is empty: an
  * empty chunk is a row of no height that cannot be tapped, and two rows claiming the same offset.
+ * A start left out is an empty chunk, so its count of characters goes with it and nothing is lost.
  */
-private fun push(out: IntArray, count: Int, offset: Int, length: Int): Int {
+private fun push(out: IntArray, chars: IntArray, count: Int, offset: Int, before: Int, length: Int): Int {
     if (count > 0 && (offset >= length || offset <= out[count - 1])) return count
     out[count] = offset
+    chars[count] = before
     return count + 1
 }
 

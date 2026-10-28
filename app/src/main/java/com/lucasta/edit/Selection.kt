@@ -102,7 +102,7 @@ internal fun SelectionLayer(
     val placed = remember { arrayOfNulls<LayoutCoordinates>(1) }
     var pressed by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
-    // The field's cursor as it was when the menu that offers to paste was asked for at it, and
+    // The window's cursor as it was when the menu that offers to paste was asked for at it, and
     // null when it was not, or the cursor has moved since.
     var cursorMenu by remember { mutableStateOf<TextRange?>(null) }
 

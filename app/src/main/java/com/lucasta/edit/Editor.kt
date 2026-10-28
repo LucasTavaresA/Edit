@@ -1,9 +1,8 @@
 package com.lucasta.edit
 
 import android.os.SystemClock
-import android.view.inputmethod.InputConnection
-import android.view.inputmethod.InputConnectionWrapper
-import androidx.compose.foundation.ExperimentalFoundationApi
+import android.view.KeyCharacterMap
+import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
@@ -16,14 +15,10 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberOverscrollEffect
 import androidx.compose.foundation.text.BasicText
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
-import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -38,31 +33,31 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.InputMode
-import androidx.compose.ui.input.InputModeManager
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.platform.InterceptPlatformTextInput
-import androidx.compose.ui.platform.LocalInputModeManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.PlatformTextInputInterceptor
+import androidx.compose.ui.input.key.utf16CodePoint
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.ResolvedTextDirection
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import java.io.Closeable
 import java.io.File
@@ -70,6 +65,7 @@ import java.text.BreakIterator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -90,13 +86,12 @@ private const val WINDOW_GUARD = 256
 /**
  * How much text the window may hold before it is cut back to size whatever the cursor is doing.
  * Text put in the middle of the window — a paste — moves neither edge nearer the cursor, so without
- * this the field would go on holding everything pasted into it and laying all of it out again on
+ * this the window would go on holding everything pasted into it and laying all of it out again on
  * every keystroke.
  *
  * Lowering it does not make the window smaller. A window is whole chunks and never fewer than one,
- * so set under about a chunk this is exceeded for ever: every change cuts the window again and
- * disposes the field, which fails in ways no real value can. It sits just above the size a window
- * has anyway, so to reach it, grow the document with real pastes.
+ * so set under about a chunk this is exceeded for ever and every change cuts the window again. It
+ * sits just above the size a window has anyway, so to reach it, grow the document with real pastes.
  */
 private const val WINDOW_MAX = CHUNK_MAX * (2 * WINDOW_CHUNKS + 2)
 
@@ -118,20 +113,31 @@ private const val PAUSE_MILLIS = 1_000L
 /** Blank space under the last line, so the end of a file is not stuck against the bottom edge. */
 private val TAIL = 160.dp
 
+/** How the cursor is drawn: as wide as a text field's, and blinking at the same pace. */
+private val CURSOR_WIDTH = 2.dp
+
+private const val CURSOR_BLINK_MILLIS = 500L
+
 /**
  * The document, plus the slice of it that is currently editable.
  *
  * The document is a [Content], addressed in bytes. A row is decoded when it is drawn and thrown
  * away when it scrolls off, so nothing here holds the text of the file.
  *
- * The window — a few chunks around the cursor, held in a [TextFieldState] — is what takes input.
- * Every other chunk on screen is laid out read-only, and everything off screen is not laid out at
- * all. The window is cut again around the cursor whenever the cursor nears an edge of it or it has
- * been filled past [WINDOW_MAX]. A selection is never the field's, whatever made it and wherever it
- * reaches: it is held as [marked].
+ * The window — a few chunks around the cursor, held in a [WindowText] — is the one row that is
+ * edited in place and the one that holds the cursor. Every other chunk on screen is laid out
+ * read-only, and everything off screen is not laid out at all. The window is cut again around the
+ * cursor whenever the cursor nears an edge of it or it has been filled past [WINDOW_MAX]. A
+ * selection is never the window's, whatever made it and wherever it reaches: it is held as
+ * [marked].
+ *
+ * The keyboard is connected to the document rather than to the window, through [Keyboard], and
+ * addresses it in characters counted from its start, which is the only way a keyboard can address
+ * anything. So where the window sits, and its being cut, is nothing a keyboard can see.
  *
  * Every offset in here is a byte offset into the document, except the window's own, which are
- * characters; [Slice] crosses between the two.
+ * characters, and the keyboard's, which are characters too; [Slice] crosses between the first two,
+ * and [charOf] and [offsetAtChar] between the document's bytes and the keyboard's characters.
  *
  * [spill] is where the document it starts with keeps its typed buffer once that is too large for
  * memory.
@@ -142,8 +148,11 @@ class DocumentState(spill: File?) : Closeable {
     var content: Content by mutableStateOf(Content.empty(spill))
         private set
 
-    var chunks: IntArray by mutableStateOf(intArrayOf(0))
+    var index: Index by mutableStateOf(Index(intArrayOf(0), intArrayOf(0, 0)))
         private set
+
+    /** Where each chunk starts, in bytes. */
+    val chunks: IntArray get() = index.starts
 
     /** Bumped on every load, for anything that has to start over rather than carry on. */
     var generation by mutableIntStateOf(0)
@@ -157,11 +166,24 @@ class DocumentState(spill: File?) : Closeable {
     var version by mutableIntStateOf(0)
         private set
 
-    /** Bumped whenever the window is cut again or tapped, which is when the field wants focus back. */
+    /**
+     * Bumped whenever the user puts the cursor somewhere — a tap, a key, an undo — which is when the
+     * editor takes focus and the keyboard comes up. Cutting the window is not one of them.
+     */
     var opened by mutableIntStateOf(0)
         private set
 
-    val window = TextFieldState()
+    val window = WindowText()
+
+    /** Whether the editor holds focus, which is when the cursor is drawn. Kept by [Keyboard]. */
+    var focused by mutableStateOf(false)
+
+    /**
+     * The word the keyboard is composing, in the document's characters as the keyboard counts them,
+     * or null. Kept in those rather than in the window's, so that cutting the window leaves it
+     * where it is. Anything the editor changes itself lets go of it, as a text field does.
+     */
+    var composition: TextRange? by mutableStateOf(null)
 
     /** Range of the document the window stands in for, or -1 when nothing is focused. */
     var windowStart by mutableIntStateOf(-1)
@@ -187,23 +209,25 @@ class DocumentState(spill: File?) : Closeable {
      * carried — the end is the one that moves, and may come before the start — or null when there
      * is none.
      *
-     * A selection is always this and never the field's. The field holds a few kilobytes and a
-     * selection may reach across a gigabyte, so the rows draw it, the editor's own handles carry it
-     * and [swallow] applies an edit made over it, while the field holds only the part of it the
-     * window covers, [parked]. Nothing is decoded, laid out or copied to hold one, whatever it
-     * covers.
+     * A selection is always this. The window holds a few kilobytes and a selection may reach
+     * across a gigabyte, so the rows draw it and the editor's own handles carry it. Nothing is
+     * decoded, laid out or copied to hold one, whatever it covers.
      *
-     * While one stands the rows are in step with the document: whatever makes one commits first,
-     * and whatever the field then does to its text is applied to the selection instead.
+     * While one stands the rows are in step with the document: whatever makes one commits first.
      *
-     * A touch makes one and so does the keyboard. A selection the keyboard makes or moves in the
-     * field — a swipe from backspace, its select keys — becomes this one in [swallow], and since
-     * the field goes on holding exactly what the keyboard set, the keyboard reads back what it
-     * set: it builds every step of such a gesture on the selection it last set and acts on what it
-     * reads, so a field answering with anything else leaves it working on a selection that is not
-     * there.
+     * A touch makes one and so does the keyboard. A selection the keyboard sets — a swipe from
+     * backspace, its select keys — is this one, set through [selectChars], and what the keyboard
+     * reads back is this one too: it builds every step of such a gesture on the selection it last
+     * set and acts on what it reads.
      */
     var marked: TextRange? by mutableStateOf(null)
+        private set
+
+    /**
+     * Whether a drag is carrying [marked], which the keyboard hears of once it lets go — see
+     * [park] — rather than at every character it crosses.
+     */
+    var held by mutableStateOf(false)
         private set
 
     /**
@@ -214,12 +238,9 @@ class DocumentState(spill: File?) : Closeable {
     var touched by mutableStateOf(false)
         private set
 
-    /** What the field holds while [marked] stands; see [park]. */
-    private var parked: TextRange? = null
-
     /**
-     * Where the field's cursor stood when the mark was made, in its own characters, which is where
-     * it stays while the window holds none of the mark.
+     * Where the window's cursor stood when the mark was made, in its own characters, which is where
+     * it goes back to when the mark is let go of somewhere off screen; see [deselect].
      */
     private var rest = 0
 
@@ -255,7 +276,7 @@ class DocumentState(spill: File?) : Closeable {
     /** What the window was given, which is what an edit to it is measured against. */
     private var windowSlice = Slice("", 0, Encoding.Utf8, intArrayOf(0, 0))
 
-    /** The line break at the end of the window's range, in bytes, which the field does not hold. */
+    /** The line break at the end of the window's range, in bytes, which [window] does not hold. */
     private var windowBreak = 0
 
     /**
@@ -291,16 +312,6 @@ class DocumentState(spill: File?) : Closeable {
     var visibleTo = 0
 
     /**
-     * Which window the field is to take focus for, or -1 when nobody is waiting for it.
-     *
-     * Addressed to a window rather than kept as a flag, because cutting the window leaves two rows
-     * alive at once: the one being replaced re-runs its effects before the new one has composed, so
-     * a flag would be taken by the row about to be disposed and go with it, leaving the field that
-     * survives unfocused and the keyboard shut.
-     */
-    private var focusFor = -1
-
-    /**
      * One chunk for the whole document, which is what encrypted files get: the window covers
      * everything and every edit is an ordinary edit in one text field. Only possible because such a
      * document is capped at [MAX_ENCRYPTED_BYTES].
@@ -330,8 +341,8 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     suspend fun load(value: Content, whole: Boolean = false) {
-        val starts = when {
-            whole -> intArrayOf(0)
+        val indexed = when {
+            whole -> oneChunk(value)
             value.length < INDEX_OFF_THREAD -> timed("index") { chunkStarts(value, 0, value.length, value.encoding) }
             else -> withContext(Dispatchers.IO) { timed("index") { chunkStarts(value, 0, value.length, value.encoding) } }
         }
@@ -339,16 +350,17 @@ class DocumentState(spill: File?) : Closeable {
         this.whole = whole
         windowStart = -1
         windowEnd = -1
-        focusFor = -1
         behind = false
         lastFrom = -1
         windowBreak = 0
         windowSlice = Slice("", 0, value.encoding, intArrayOf(0, 0))
+        window.set("", 0)
+        composition = null
         unmark()
         visibleFrom = 0
         visibleTo = 0
         content = value
-        chunks = starts
+        index = indexed
         generation++
         changed()
     }
@@ -363,9 +375,6 @@ class DocumentState(spill: File?) : Closeable {
      * sets.
      */
     suspend fun save(write: suspend (Take) -> Result<Collision>): Result<Collision> {
-        // An edit made over a mark and not yet applied is applied first, or the take would have the
-        // field's few kilobytes stand in for the whole of the mark.
-        swallow()
         commit()
         val content = content
         val take = content.take()
@@ -378,15 +387,13 @@ class DocumentState(spill: File?) : Closeable {
 
     /** Puts the cursor at [offset], moving the window there. The offset is the document's bytes. */
     suspend fun focus(offset: Int) {
-        // An edit made over the mark is applied first, or committing would record it as the field's
-        // few kilobytes changing on their own. It moves the document, so [offset] names nothing now.
-        if (swallow()) return
         val at = shifted(offset)
         unmark()
         commit()
         val to = at.coerceIn(0, content.length)
         reach(chunkIndexAt(chunks, to))
         open(to)
+        opened++
         changed()
     }
 
@@ -395,25 +402,23 @@ class DocumentState(spill: File?) : Closeable {
      * a touch asked for it, which brings up the handles and the menu with it.
      */
     fun selectAll(touched: Boolean = true) {
-        swallow()
         // Before the emptiness test, not after: a document typed from new holds everything it has
-        // in the field, and asking the document how long it is before that is written back answers
+        // in the window, and asking the document how long it is before that is written back answers
         // for a document nobody has typed into.
         commit()
         if (content.length == 0) return
-        // Nothing scrolls. The field selects all of itself, and no cursor is drawn or followed
-        // while a selection stands, so neither the end of the document nor of the window is
-        // brought on screen.
+        // Nothing scrolls. No cursor is drawn or followed while a selection stands, so neither the
+        // end of the document nor of the window is brought on screen.
         mark(TextRange(0, content.length), touched = touched)
     }
 
     /**
      * Carries the moving end of the selection by [step], or starts a selection at the cursor when
      * there is none, and scrolls to where it went: shift and an arrow, a page or a line's end. It
-     * reaches anywhere in the document, since the rows rather than the field say where it goes.
+     * reaches anywhere in the document, since the rows say where it goes.
      */
     suspend fun select(step: Step) = stepping.withLock {
-        if (swallow() || windowStart < 0) return@withLock
+        if (windowStart < 0) return@withLock
         commit()
         val mark = marked
         val anchor = mark?.start ?: byteOf(window.selection.end)
@@ -429,11 +434,10 @@ class DocumentState(spill: File?) : Closeable {
     /**
      * A key that moves the cursor without shift. A selection is let go of instead: the cursor goes
      * to its start for a [step] back and to its end otherwise. Without one, the cursor moves by
-     * [step] as the rows have it, which is how a page or the document's ends are reached: the field
-     * would take those only as far as the window.
+     * [step] as the rows have it, which reaches a page away or the document's ends as readily as
+     * the next character.
      */
     suspend fun move(step: Step) = stepping.withLock {
-        if (swallow()) return@withLock
         val mark = marked
         if (mark != null) return@withLock collapseAt(if (step.back) mark.min else mark.max)
         if (windowStart < 0) return@withLock
@@ -446,10 +450,85 @@ class DocumentState(spill: File?) : Closeable {
         unmark()
         val at = offset - windowStart
         if (windowStart >= 0 && at in 0..windowSlice.bytes) {
-            window.edit { selection = TextRange(windowSlice.charAt(at)) }
+            window.select(windowSlice.charAt(at))
         } else {
             focus(offset)
         }
+    }
+
+    /**
+     * Takes out what a [step] from the cursor crosses, or the mark when there is one: backspace and
+     * delete, and with ctrl a word of either.
+     */
+    suspend fun erase(step: Step) = stepping.withLock {
+        val mark = marked
+        if (mark != null) return@withLock cut(raise = true)
+        if (windowStart < 0) return@withLock
+        composition = null
+        // A character either side is found in the window itself, which is every backspace but the
+        // one at its very edge, so that a key held down is typing and commits nothing.
+        record()
+        val at = window.selection.start
+        val near = characterWithin(window.text, at, step)
+        if (near != null) {
+            if (near != at) type(TextRange(near, at), "", own = false)
+            return@withLock
+        }
+        commit()
+        val from = byteOf(at)
+        val to = stepFrom(from, step)
+        if (to != from) put(TextRange(from, to), "")
+    }
+
+    /**
+     * Where a step of one character from [at] lands in [text], or null when the step is not one
+     * character or would leave it.
+     */
+    private fun characterWithin(text: String, at: Int, step: Step): Int? {
+        if (step != Step.Left && step != Step.Right) return null
+        if (if (step.back) at <= 0 else at >= text.length) return null
+        val characters = BreakIterator.getCharacterInstance()
+        characters.setText(text)
+        val next = if (step.back) characters.preceding(at) else characters.following(at)
+        return if (next == BreakIterator.DONE) null else next
+    }
+
+    /** Puts [text] over the mark, or at the cursor when there is none: typing on a hardware keyboard. */
+    fun typeText(text: CharSequence) {
+        val mark = marked
+        if (mark == null && windowStart < 0) return
+        unmark()
+        // Recorded rather than committed, which is all reading the cursor's place takes, so that
+        // typing commits nothing; a mark has the rows in step already.
+        record()
+        composition = null
+        put(mark ?: TextRange(byteOf(window.selection.end)), text)
+    }
+
+    /**
+     * Puts [text] over [range], in the document's bytes, as typing: in the window when the window
+     * holds all of it, and through the document otherwise, the window opening again at the end of
+     * it either way.
+     */
+    private fun put(range: TextRange, text: CharSequence) {
+        val chars = windowChars(range)
+        if (chars != null) type(chars, text, own = false)
+        else replace(range, text, reopen = true)
+    }
+
+    /**
+     * [range], in the document's bytes, as the window's own characters, or null when the window
+     * does not hold all of it or crossing between the two would round either end.
+     */
+    private fun windowChars(range: TextRange): TextRange? {
+        if (windowStart < 0) return null
+        val from = range.min - windowStart
+        val to = range.max - windowStart
+        if (from < 0 || to > windowSlice.bytes) return null
+        val start = windowSlice.charAt(from)
+        val end = windowSlice.charAt(to)
+        if (windowSlice.byteAt(start) != from || windowSlice.byteAt(end) != to) return null
+        return TextRange(start, end)
     }
 
     /** Where a [step] from [from] lands, as the document and, for a line or a page, the rows have it. */
@@ -562,6 +641,17 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
+     * The screen under the text got shorter than [was]: brings the cursor back on screen if it was
+     * on it before, as a text field does when the keyboard comes up over it. A cursor the user had
+     * already scrolled away from is left where it is.
+     */
+    suspend fun shrunk(was: Int) {
+        if (!focused || windowStart < 0 || marked != null) return
+        val caret = cursorCaret() ?: return
+        if (caret.top >= 0 && caret.bottom <= was) showCursor()
+    }
+
+    /**
      * Scrolls until the byte at [offset] is on screen, as [showCursor] does for the cursor: the
      * moving end of a selection is what a key carries, and no cursor is there to follow.
      */
@@ -589,19 +679,21 @@ class DocumentState(spill: File?) : Closeable {
     suspend fun redo() = step(back = false)
 
     private suspend fun step(back: Boolean) {
-        swallow()
         unmark()
         commit()
+        composition = null
+        lastFrom = -1
         val span = (if (back) content.undo() else content.redo()) ?: return
         val delta = span.now - span.was
-        chunks = if (whole) intArrayOf(0)
-        else respan(chunks, span.at, span.at + span.was, delta, content, content.encoding, content.length)
+        index = if (whole) oneChunk(content)
+        else respan(index, span.at, span.at + span.was, delta, content, content.encoding, content.length)
         val seen = span.at in visibleFrom..visibleTo
         if (visibleFrom > span.at && visibleFrom >= span.at + span.was) visibleFrom += delta
         else if (visibleFrom > span.at) visibleFrom = span.at
         windowStart = -1
         reach(chunkIndexAt(chunks, span.at.coerceIn(0, content.length)))
         open(span.at + span.now)
+        opened++
         // A change walked back somewhere off screen would look like nothing happening at all.
         if (!seen) list?.scrollToItem(rowsNow().rowAt(windowStart))
         changed()
@@ -611,22 +703,24 @@ class DocumentState(spill: File?) : Closeable {
      * Keeps the window around the cursor and keeps it small: cut again whenever the cursor comes
      * within [WINDOW_GUARD] of an edge, or whenever more than [WINDOW_MAX] has been put into it.
      *
-     * Called for every change to the field, not only for every move of the cursor: deleting
+     * Called for every change to the window, not only for every move of the cursor: deleting
      * forwards does not move the cursor and pasting does not move it towards an edge, and both
      * still have to move the window.
      *
-     * Left alone while a selection stands. The field holds only the part of it the window covers
-     * then, so nothing it does needs the window moved, and the screen is not to be pulled over to
-     * wherever that part is.
+     * Left alone while a selection stands: no cursor is drawn then, and the screen is not to be
+     * pulled over to wherever the window is.
+     *
+     * Nothing the keyboard can see moves when the window is cut. It counts the document from its
+     * start, and the cursor and what it is composing are in the same place of the document after a
+     * cut as before it.
      */
     suspend fun follow() {
         // Taken whatever happens below, so that it answers for this change and no later one.
         val quiet = still
         still = false
         if (windowStart < 0) return
-        if (swallow()) return
         if (marked != null) return
-        // Before anything that suspends, so what reaches the change list is what the field holds
+        // Before anything that suspends, so what reaches the change list is what the window holds
         // now. The flow conflates, so keystrokes faster than a frame are one change, which loses
         // nothing.
         record()
@@ -636,13 +730,9 @@ class DocumentState(spill: File?) : Closeable {
         // arrives, this runs once a frame rather than once a keystroke.
         withFrameNanos { }
         if (windowStart < 0) return
-        // Before deciding whether to cut, so that a cut never lands on a field that is off screen.
-        // Scrolling away from the cursor does not dispose the field either: a focused field pins
-        // the list item it sits in (its FocusableNode does, in foundation 1.12, and nothing
-        // documents it), so the keyboard stays up and the next keystroke brings it back here.
         if (!quiet) showCursor()
         val selection = window.selection
-        if (!selection.collapsed || whole) return
+        if (whole) return
         val text = window.text
         val nearStart = selection.min < WINDOW_GUARD && windowStart > 0
         val nearEnd = selection.max > text.length - WINDOW_GUARD && windowEnd < length
@@ -650,7 +740,7 @@ class DocumentState(spill: File?) : Closeable {
         if (!nearStart && !nearEnd && !tooLong) return
         // Where the cursor is, closely enough to decide which chunks the window should cover. It
         // has to be answered before committing, or every keystroke near an edge would commit; the
-        // exact offset is taken afterwards, off a window slice that has caught up with the field.
+        // exact offset is taken afterwards, off a window slice that has caught up with the window.
         val char = selection.min
         val near = (windowStart + content.encoding.encodedLength(text, 0, char)).coerceIn(0, content.length)
         val index = chunkIndexAt(chunks, near)
@@ -662,113 +752,12 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * Whether the row drawing [start] is the one being asked to take focus: true once per cut of
-     * the window, so the field takes focus when it appears but not every time scrolling brings it
-     * back. Only asks; [focusTaken] answers, once the field really holds focus, since the row
-     * asking may be disposed, or its effect cancelled by the next cut, before it gets there.
-     */
-    fun wantsFocus(start: Int) = focusFor >= 0 && focusFor == start
-
-    /** The field is focused, so nothing is waiting for it any more. */
-    fun focusTaken(start: Int) {
-        if (focusFor == start) focusFor = -1
-    }
-
-    /**
-     * Brings the mark up to whatever the field has done since it was last looked at, and answers
-     * whether that moved the document, which leaves any offset taken before it naming nothing.
-     *
-     * A selection the field holds that the mark does not is the keyboard's doing, and becomes the
-     * mark: one end it moved moves the mark's, and an end the window cut short stays where it is
-     * beyond it. A cursor in place of one drops the mark.
-     *
-     * An edit made over the mark — typing, pasting or deleting over it — is applied to the whole of
-     * it, and that is what moves the document. Where the field held all of it, the edit is the
-     * field's own and goes into the document as any other does, which keeps the window, and the
-     * keyboard's session, where they are. Otherwise what the field put where its selection stood
-     * replaces the mark, and the window opens again around it.
-     */
-    fun swallow(): Boolean {
-        if (windowStart < 0) return false
-        val mark = marked
-        val selection = window.selection
-        if (mark == null) {
-            if (selection.collapsed) return false
-            // Before reading offsets off the window, which have to answer for what it holds now.
-            commit()
-            mark(TextRange(byteOf(selection.start), byteOf(selection.end)), touched = false)
-            return false
-        }
-        val now = window.text
-        val held = parked
-        if (windowSlice.text.contentEquals(now)) {
-            if (selection == held) return false
-            if (selection.collapsed) {
-                unmark()
-                return false
-            }
-            val moved = when {
-                held == null || held.collapsed -> TextRange(byteOf(selection.start), byteOf(selection.end))
-                selection.min == held.min && selection.max == held.max -> {
-                    parked = selection
-                    return false
-                }
-                selection.min == held.min -> TextRange(mark.min, byteOf(selection.max))
-                selection.max == held.max -> TextRange(mark.max, byteOf(selection.min))
-                else -> TextRange(byteOf(selection.start), byteOf(selection.end))
-            }
-            mark(moved, touched = false)
-            return false
-        }
-        unmark()
-        if (held != null && fits(mark, held)) {
-            // Nothing carries on from the typing before it.
-            lastFrom = -1
-            return false
-        }
-        replace(mark, typedOver(now, held), reopen = true)
-        return true
-    }
-
-    /**
-     * Whether the field's selection [held] is exactly [mark]: the window holds all of it, and
-     * crossing between bytes and characters rounds neither end.
-     */
-    private fun fits(mark: TextRange, held: TextRange): Boolean {
-        if (windowStart < 0) return false
-        val from = mark.min - windowStart
-        val to = mark.max - windowStart
-        if (from < 0 || to > windowSlice.bytes) return false
-        val start = windowSlice.charAt(from)
-        val end = windowSlice.charAt(to)
-        return held.min == start && held.max == end && windowSlice.byteAt(start) == from && windowSlice.byteAt(end) == to
-    }
-
-    /**
-     * What the keyboard put where the field's selection [held] stood: whatever is now between the
-     * text before it and the text after it, where it left both as they were. Should it have changed
-     * either, what changed is taken instead.
-     */
-    private fun typedOver(now: CharSequence, held: TextRange?): CharSequence {
-        val was = windowSlice.text
-        if (held != null) {
-            val tail = was.length - held.max
-            val end = now.length - tail
-            if (end >= held.min && now.same(0, was, 0, held.min) && now.same(end, was, held.max, tail)) {
-                return now.subSequence(held.min, end)
-            }
-        }
-        val change = change(was, now, window.selection.max) ?: return ""
-        return now.subSequence(change.from, change.now)
-    }
-
-    /**
      * Selects [range], in the document's bytes, from its start to its end, which may come first.
      * Commits before anything else, so that the rows drawing it are in step with the document.
      * [touched] says whether a touch made it; see [DocumentState.touched].
      *
-     * With [park] the field takes the part of it the window holds. A drag leaves that until it
-     * lets go, rather than tell the keyboard about every character it crosses.
+     * Without [park] the keyboard is not told yet: a drag tells it once it lets go, through [park],
+     * rather than at every character it crosses.
      */
     fun mark(range: TextRange, park: Boolean = true, touched: Boolean = true) {
         commit()
@@ -779,29 +768,12 @@ class DocumentState(spill: File?) : Closeable {
         if (marked == null) rest = window.selection.end
         marked = range
         this.touched = touched
-        if (park) this.park()
+        held = !park
     }
 
-    /**
-     * Puts the part of the mark the window holds into the field as its selection, or a cursor at
-     * [rest] when it holds none of it. The field goes on holding exactly what the keyboard set
-     * while that is the same stretch, whichever way round, since the keyboard reads back what it
-     * set and acts on that.
-     */
+    /** Tells the keyboard where the mark a drag carried has got to. */
     fun park() {
-        val mark = marked ?: return
-        if (windowStart < 0) return
-        val bytes = windowSlice.bytes
-        val from = mark.start - windowStart
-        val to = mark.end - windowStart
-        val held = if (mark.max - windowStart <= 0 || mark.min - windowStart >= bytes) {
-            TextRange(rest.coerceIn(0, window.text.length))
-        } else {
-            TextRange(windowSlice.charAt(from.coerceIn(0, bytes)), windowSlice.charAt(to.coerceIn(0, bytes)))
-        }
-        val now = window.selection
-        if (now.min != held.min || now.max != held.max) window.edit { selection = held }
-        parked = window.selection
+        held = false
     }
 
     /**
@@ -809,7 +781,6 @@ class DocumentState(spill: File?) : Closeable {
      * there, and back where it stood before the selection otherwise, and nothing scrolls to it.
      */
     fun deselect() {
-        if (swallow()) return
         val mark = marked ?: return
         unmark()
         if (windowStart < 0) return
@@ -819,12 +790,12 @@ class DocumentState(spill: File?) : Closeable {
         val at = TextRange(if (seen && end in 0..windowSlice.bytes) windowSlice.charAt(end) else rest.coerceIn(0, window.text.length))
         if (window.selection == at) return
         still = true
-        window.edit { selection = at }
+        window.select(at.start)
     }
 
     private fun unmark() {
         marked = null
-        parked = null
+        held = false
     }
 
     /** What the mark covers, read out of the document, or null when there is none. */
@@ -832,37 +803,40 @@ class DocumentState(spill: File?) : Closeable {
 
     /** Takes the mark out of the document. [raise] keeps the window, and the keyboard, at the gap. */
     fun cut(raise: Boolean) {
-        if (swallow()) return
         val mark = marked ?: return
         unmark()
-        if (fits(mark, window.selection)) type("")
+        composition = null
+        val chars = windowChars(mark)
+        if (chars != null) type(chars, "")
         else replace(mark, "", reopen = raise && windowStart >= 0)
     }
 
     /** Puts [text] over the mark, or at the cursor when there is none, which is an ordinary edit. */
     fun paste(text: CharSequence, raise: Boolean) {
-        if (swallow()) return
         val mark = marked
         unmark()
-        if (mark != null && !fits(mark, window.selection)) replace(mark, text, reopen = raise && windowStart >= 0)
-        else if (windowStart >= 0) type(text)
+        composition = null
+        val chars = if (mark != null) windowChars(mark) else window.selection
+        if (mark != null && chars == null) replace(mark, text, reopen = raise && windowStart >= 0)
+        else if (windowStart >= 0 && chars != null) type(chars, text)
     }
 
     /**
-     * Puts [text] over the field's selection, as an edit of the field's own and a change of its
-     * own. The window and the keyboard's session stay as they are, panels and all, which an edit
-     * the document makes around the field cannot promise.
+     * Puts [text] over the window's characters [chars], and the cursor after it. The window stays
+     * where it is. With [own] it is a change of its own, which is what a paste or a cut is, rather
+     * than typing that carries on from the typing before it.
      */
-    private fun type(text: CharSequence) {
-        lastFrom = -1
-        window.edit {
-            val at = selection.min
-            replace(at, selection.max, text)
-            selection = TextRange(at + text.length)
-        }
+    private fun type(chars: TextRange, text: CharSequence, own: Boolean = true) {
+        // Before the edit as well as after it, so that what the window held before is not taken
+        // into this change.
+        record()
+        if (own) lastFrom = -1
+        window.replace(chars.min, chars.max, text)
+        record()
+        if (own) lastFrom = -1
     }
 
-    /** Where the field's character [char] is in the document, while it holds what the window was given. */
+    /** Where the window's character [char] is in the document, once what it holds is recorded. */
     private fun byteOf(char: Int) = windowStart + windowSlice.byteAt(char)
 
     /**
@@ -874,14 +848,14 @@ class DocumentState(spill: File?) : Closeable {
      * change took it, there is no place left to hold, and the list goes to where the change ends.
      */
     private fun replace(range: TextRange, text: CharSequence, reopen: Boolean) {
+        // What the window holds goes in first: it is about to be read again from the document.
+        commit()
         val from = range.min
         val to = range.max
         val typed = content.encoding.encode(text, 0, text.length)
         val was = content.length
-        // A window opened anywhere else is another field. Focus going over to it closes the
-        // keyboard and opens it again, and the list growing and shrinking under the field that has
-        // focus scrolls it to keep that field in view, which leaves the cursor off the screen. So
-        // the window stays where it stood whenever the change is inside it.
+        // The window stays where it stood whenever the change is inside it, so that the rows on
+        // screen are not laid out again for nothing.
         val stood = windowStart >= 0 && from >= windowStart && to <= windowEnd
         val start = windowStart
         val end = windowEnd
@@ -889,8 +863,9 @@ class DocumentState(spill: File?) : Closeable {
         val head = chunks[chunkIndexAt(chunks, from)]
         val tail = chunkEndAt(chunks, chunkIndexAt(chunks, to.coerceAtMost(was)), was)
         val delta = content.replace(from, to, typed)
-        chunks = if (whole) intArrayOf(0)
-        else respan(chunks, from, to, delta, content, content.encoding, content.length)
+        lastFrom = -1
+        index = if (whole) oneChunk(content)
+        else respan(index, from, to, delta, content, content.encoding, content.length)
         val top = visibleFrom
         val held = top <= head || top >= tail
         visibleFrom = when {
@@ -900,7 +875,6 @@ class DocumentState(spill: File?) : Closeable {
         }
         windowStart = -1
         windowEnd = -1
-        focusFor = -1
         if (reopen && stood) open(from + typed.size, start, end + delta)
         else if (reopen) open(from + typed.size)
         list?.let {
@@ -915,12 +889,8 @@ class DocumentState(spill: File?) : Closeable {
      * when the screen is not showing the document as it stands: the frame after it changed, before
      * the rows have caught up. Anything below the last row is the end of it, which is what a touch
      * on the empty screen under a short document means.
-     *
-     * An edit made over the mark is applied first, since until it is the screen is about to change
-     * under whatever is being pointed at.
      */
     fun spotAt(position: Offset): Spot? {
-        if (swallow()) return null
         val info = list?.layoutInfo ?: return null
         val y = position.y.coerceIn(0f, (info.viewportSize.height - 1).coerceAtLeast(0).toFloat())
         val item = info.visibleItemsInfo.lastOrNull { it.key is Int && it.offset <= y } ?: return null
@@ -934,7 +904,7 @@ class DocumentState(spill: File?) : Closeable {
 
     /**
      * Where [char] of the row at [spot] is in the document. The window's own bytes are known only
-     * once what the field holds is recorded, so asking about it records that first; a row past the
+     * once what the window holds is recorded, so asking about it records that first; a row past the
      * window has moved by whatever the window has gained, which [shifted] adds.
      */
     fun offsetOf(spot: Spot, char: Int = spot.char): Int {
@@ -946,20 +916,17 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * A tap at [spot], which puts the cursor there. Inside the window that is only the field's
-     * cursor moving, so the window stays and the keyboard keeps its session; anywhere else the
-     * window moves to it.
+     * A tap at [spot], which puts the cursor there. Inside the window that is only the cursor
+     * moving, so the window stays; anywhere else the window moves to it.
      */
     suspend fun tap(spot: Spot) {
-        if (swallow()) return
         unmark()
         val slice = spot.slice
         if (slice != null) {
             focus(spot.row + slice.byteAt(spot.char))
             return
         }
-        window.edit { selection = TextRange(spot.char.coerceIn(0, length)) }
-        focusFor = windowStart
+        window.select(spot.char)
         opened++
     }
 
@@ -983,7 +950,7 @@ class DocumentState(spill: File?) : Closeable {
         return item to row
     }
 
-    /** Where the field's cursor is drawn, in the list's own coordinates, or null when it is not. */
+    /** Where the cursor is drawn, in the list's own coordinates, or null when it is not. */
     fun cursorCaret(): Rect? {
         if (windowStart < 0) return null
         val item = list?.layoutInfo?.visibleItemsInfo?.firstOrNull { it.key == windowStart } ?: return null
@@ -998,14 +965,14 @@ class DocumentState(spill: File?) : Closeable {
         return Rect(x, top + layout.getLineTop(line), x, top + layout.getLineBottom(line))
     }
 
-    /** The part of the mark the window holds, in the field's own characters, or null. */
+    /** The part of the mark the window holds, in the window's own characters, or null. */
     fun markedInWindow(): TextRange? {
         val mark = marked ?: return null
         if (windowStart < 0 || mark.max <= windowStart || mark.min >= windowEnd) return null
         return TextRange(windowSlice.charAt(mark.min - windowStart), windowSlice.charAt(mark.max - windowStart))
     }
 
-    /** Whether the mark goes on over the line break the window ends at, which the field does not hold. */
+    /** Whether the mark goes on over the line break the window ends at, which the window does not hold. */
     fun markedPastWindow(): Boolean {
         val mark = marked ?: return false
         val text = windowStart + windowSlice.bytes
@@ -1014,7 +981,7 @@ class DocumentState(spill: File?) : Closeable {
 
     /**
      * What the row starting at [start] drew, while the screen still shows it. A row is out of date
-     * once the document has moved on from the version it drew, and the window once the field holds
+     * once the document has moved on from the version it drew, and the window once it holds
      * other text than it laid out.
      */
     private fun drawnAt(start: Int): Drawn? {
@@ -1025,8 +992,8 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * Writes the run the field has changed, as [change] names it, into the document as a change of
-     * its own. Called for every change to the field, since text the document never saw cannot be
+     * Writes the run the window has changed, as [change] names it, into the document as a change of
+     * its own. Called for every change to the window, since text the document never saw cannot be
      * brought back by anything. The rows are not told; see [behind].
      */
     private fun record() {
@@ -1047,8 +1014,8 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * Brings the rows up to what the document holds, without closing the window: the field keeps
-     * its text, its selection and its focus, and only the offsets around it move.
+     * Brings the rows up to what the document holds, without closing the window: the window keeps
+     * its text and its cursor, and only the offsets around it move.
      *
      * The whole of the window's range is re-indexed rather than the run that was typed, because by
      * now that may be a hundred separate changes and they are all inside it anyway.
@@ -1062,10 +1029,19 @@ class DocumentState(spill: File?) : Closeable {
         // Strictly past the window, not merely at it: text inserted at the top row's start belongs
         // to that row rather than above it, and the window's own start is where such text lands.
         if (visibleFrom > windowStart && visibleFrom >= to) visibleFrom += delta
-        chunks = if (whole) intArrayOf(0)
-        else respan(chunks, windowStart, to, delta, content, content.encoding, content.length)
+        index = if (whole) oneChunk(content)
+        else respan(index, windowStart, to, delta, content, content.encoding, content.length)
         behind = false
         version++
+    }
+
+    /**
+     * The index of a [whole] document: one chunk however long it is, which is what keeps it one
+     * text field, and its characters counted afresh, which its cap keeps cheap.
+     */
+    private fun oneChunk(value: Content): Index {
+        val bytes = value.read(0, value.length)
+        return Index(intArrayOf(0), intArrayOf(0, value.encoding.decodedLength(bytes, 0, bytes.size)))
     }
 
     /**
@@ -1076,7 +1052,6 @@ class DocumentState(spill: File?) : Closeable {
      * With [from] it starts there instead and ends with the chunk holding the byte before [to],
      * which is how a window is opened again where it already stood.
      */
-    @OptIn(ExperimentalFoundationApi::class)
     private fun open(offset: Int, from: Int = -1, to: Int = -1) {
         val at = offset.coerceIn(0, content.length)
         val index = chunkIndexAt(chunks, at)
@@ -1093,19 +1068,10 @@ class DocumentState(spill: File?) : Closeable {
         val slice = full.dropLast(trailingBreak(full.text))
         windowBreak = full.bytes - slice.bytes
         windowSlice = slice
-        window.edit {
-            replace(0, length, slice.text)
-            selection = TextRange(slice.charAt(at - windowStart))
-        }
-        // The field keeps its own history of what it held, which after a cut is somebody else's
-        // text at somebody else's offsets. The document's own history is what undo walks, and the
-        // keys that ask for one are taken before the field ever sees them — see [keys].
-        window.undoState.clearHistory()
+        window.set(slice.text, slice.charAt(at - windowStart))
         behind = false
-        // Nothing typed after the window moved carries on from anything typed before it.
-        lastFrom = -1
-        focusFor = windowStart
-        opened++
+        // Typing carries on across a cut as if there had been none: where the last change left the
+        // text standing is a place in the document, which a cut does not move.
     }
 
     /**
@@ -1199,6 +1165,202 @@ class DocumentState(spill: File?) : Closeable {
         return offset + now - (windowEnd - windowStart)
     }
 
+    /**
+     * How many characters come before [offset], a byte of the document, counted from its start as a
+     * keyboard counts them.
+     */
+    fun charOf(offset: Int): Int {
+        record()
+        if (windowStart < 0 || offset < windowStart) return rowChar(offset)
+        val at = offset - windowStart
+        val base = rowChar(windowStart)
+        if (at <= windowSlice.bytes) return base + windowSlice.charAt(at)
+        if (at <= windowSlice.bytes + windowBreak) {
+            return base + windowSlice.text.length + (at - windowSlice.bytes) / content.encoding.unitBytes
+        }
+        return rowChar(offset - recorded) + charShift()
+    }
+
+    /** The byte of the document [char] characters in, the other way across from [charOf]. */
+    fun offsetAtChar(char: Int): Int {
+        val at = char.coerceIn(0, charCount())
+        if (windowStart >= 0) {
+            val base = rowChar(windowStart)
+            val held = windowSlice.text.length
+            when {
+                at < base -> Unit
+                at <= base + held -> return windowStart + windowSlice.byteAt(at - base)
+                at <= base + held + breakChars() ->
+                    return windowStart + windowSlice.bytes + (at - base - held) * content.encoding.unitBytes
+                else -> return rowOffset(at - charShift()) + recorded
+            }
+        }
+        return rowOffset(at)
+    }
+
+    /** How long the document is, in characters. */
+    fun charCount(): Int {
+        record()
+        return index.chars.last() + if (windowStart < 0) 0 else charShift()
+    }
+
+    /**
+     * The document's characters [from] to [to]. Read off whole chunks and the window, never off a
+     * run of bytes cut anywhere else, so that no character is cut in half on the way, whatever it
+     * takes to encode.
+     */
+    fun textAt(from: Int, to: Int): String {
+        val end = to.coerceAtMost(charCount())
+        var at = from.coerceAtLeast(0)
+        val out = StringBuilder(maxOf(0, end - at))
+        val open = windowStart >= 0
+        val base = if (open) rowChar(windowStart) else 0
+        val held = if (open) windowSlice.text.length + breakChars() else 0
+        val shift = if (open) charShift() else 0
+        while (at < end) {
+            if (open && at >= base && at < base + held) {
+                val text = windowSlice.text
+                val inside = at - base
+                if (inside >= text.length) {
+                    // The line break the window ends at, which it does not hold.
+                    out.append((if (breakChars() == 2) "\r\n" else "\n")[inside - text.length])
+                    at++
+                    continue
+                }
+                val take = minOf(text.length, inside + (end - at))
+                out.append(text, inside, take)
+                at += take - inside
+                continue
+            }
+            val row = if (open && at >= base + held) at - shift else at
+            val index = chunkAtChar(row)
+            val start = chunks[index]
+            val moved = if (open && start >= windowEnd) recorded else 0
+            val text = content.slice(start + moved, chunkEndAt(chunks, index, length) + moved).text
+            val inside = row - this.index.chars[index]
+            val take = minOf(text.length, inside + (end - at))
+            if (take <= inside) break
+            out.append(text, inside, take)
+            at += take - inside
+        }
+        return out.toString()
+    }
+
+    /**
+     * The selection as a keyboard is told it, in characters: the mark, or the cursor, or null when
+     * there is neither. Always the earlier end first, whichever end was carried, as a text field
+     * tells it: keyboards work out how much a gesture deletes as the end less the start, and one
+     * that finds the mark backwards deletes nothing.
+     */
+    fun selectionChars(): TextRange? {
+        marked?.let { return TextRange(charOf(it.min), charOf(it.max)) }
+        if (windowStart < 0) return null
+        record()
+        return TextRange(rowChar(windowStart) + window.selection.start)
+    }
+
+    /**
+     * The keyboard putting [text] over the characters [from] to [to], with the cursor after it. In
+     * the window when the window holds all of it, as typing always does, so that it is typing like
+     * any other; through the document otherwise, which is a selection reaching past the window,
+     * and the window opens again at the end of it.
+     */
+    fun replaceChars(from: Int, to: Int, text: CharSequence) {
+        record()
+        unmark()
+        if (windowStart >= 0) {
+            val base = rowChar(windowStart)
+            if (from >= base && to <= base + window.text.length) {
+                type(TextRange(from - base, to - base), text, own = false)
+                return
+            }
+        }
+        replace(TextRange(offsetAtChar(from), offsetAtChar(to)), text, reopen = true)
+    }
+
+    /**
+     * The keyboard setting the selection, in characters: the mark from [start] to [end], which may
+     * come first, or the cursor when they are one place. A cursor the window does not hold takes
+     * the window with it; nothing scrolls but to keep the cursor on screen, as typing does.
+     */
+    fun selectChars(start: Int, end: Int) {
+        if (start != end) {
+            val range = TextRange(offsetAtChar(start), offsetAtChar(end))
+            // The mark it was told, given back, which is the earlier end first whichever way the
+            // mark runs, and must not turn it round.
+            val mark = marked
+            if (mark == null || mark.min != range.min || mark.max != range.max) mark(range, touched = false)
+            return
+        }
+        unmark()
+        if (windowStart >= 0) {
+            record()
+            val base = rowChar(windowStart)
+            if (start >= base && start <= base + window.text.length) {
+                window.select(start - base)
+                return
+            }
+        }
+        val at = offsetAtChar(start)
+        commit()
+        open(at)
+        changed()
+    }
+
+    /** The part of [composition] the window holds, in its own characters, or null. */
+    fun compositionInWindow(): TextRange? {
+        val composing = composition ?: return null
+        if (windowStart < 0) return null
+        val base = index.chars[chunkIndexAt(chunks, windowStart)]
+        val held = window.text.length
+        val from = (composing.min - base).coerceIn(0, held)
+        val to = (composing.max - base).coerceIn(0, held)
+        return if (from < to) TextRange(from, to) else null
+    }
+
+    /**
+     * [charOf] for [offset] in the rows' own offsets, outside the window: what the index counts
+     * before its chunk, and what the chunk holds before it.
+     */
+    private fun rowChar(offset: Int): Int {
+        val at = offset.coerceIn(0, length)
+        val index = chunkIndexAt(chunks, at)
+        val start = chunks[index]
+        if (at <= start) return this.index.chars[index]
+        val moved = if (windowStart >= 0 && start >= windowEnd) recorded else 0
+        val bytes = content.read(start + moved, at + moved)
+        return this.index.chars[index] + content.encoding.decodedLength(bytes, 0, bytes.size)
+    }
+
+    /** [offsetAtChar] for [char] in the rows' own count, outside the window, as the rows' offset. */
+    private fun rowOffset(char: Int): Int {
+        val index = chunkAtChar(char)
+        val start = chunks[index]
+        val before = this.index.chars[index]
+        if (char <= before) return start
+        val moved = if (windowStart >= 0 && start >= windowEnd) recorded else 0
+        val slice = content.slice(start + moved, chunkEndAt(chunks, index, length) + moved)
+        return start + slice.byteAt((char - before).coerceAtMost(slice.text.length))
+    }
+
+    /** The chunk the character [char] is in, as the rows count characters. */
+    private fun chunkAtChar(char: Int): Int {
+        val found = index.chars.binarySearch(char, 0, chunks.size)
+        return if (found >= 0) found else (-found - 2).coerceAtLeast(0)
+    }
+
+    /**
+     * How many characters the window has gained since [commit], which is how far every character
+     * after it has moved from where the index counts it.
+     */
+    private fun charShift(): Int {
+        val end = if (windowEnd >= length) index.chars.last() else index.chars[chunkIndexAt(chunks, windowEnd)]
+        return windowSlice.text.length + breakChars() - (end - rowChar(windowStart))
+    }
+
+    /** How many characters the line break at the end of the window is. */
+    private fun breakChars() = windowBreak / content.encoding.unitBytes
+
     override fun close() = content.close()
 }
 
@@ -1243,6 +1405,40 @@ private class Rows(
 }
 
 /**
+ * What the window holds and where the cursor is in it, in its own characters. Nothing else: no
+ * selection, which is the document's, and no history, which is the document's too.
+ */
+@Stable
+class WindowText {
+
+    var text: String by mutableStateOf("")
+        private set
+
+    /** Always a cursor; a selection is [DocumentState.marked], whatever made it. */
+    var selection: TextRange by mutableStateOf(TextRange.Zero)
+        private set
+
+    fun set(text: String, cursor: Int) {
+        this.text = text
+        select(cursor)
+    }
+
+    fun select(cursor: Int) {
+        selection = TextRange(cursor.coerceIn(0, text.length))
+    }
+
+    /** Puts [with] where [from] to [to] was, and the cursor after it. */
+    fun replace(from: Int, to: Int, with: CharSequence) {
+        text = StringBuilder(text.length - (to - from) + with.length)
+            .append(text, 0, from)
+            .append(with)
+            .append(text, to, text.length)
+            .toString()
+        select(from + with.length)
+    }
+}
+
+/**
  * What a row other than the window drew, kept so that a touch on it can be read as a place in the
  * document: the bytes it drew, where its range ends — past the line break it does not draw — and
  * the layout it drew them with, all as of [version].
@@ -1268,9 +1464,28 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: 
     val list = rememberLazyListState()
     val overscroll = rememberOverscrollEffect()
     val clip = rememberClip(state, refuse)
+    val focus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+    val view = LocalView.current
+    // The user putting the cursor somewhere brings the keyboard up. Taking focus does that on its
+    // own, but the editor usually holds it already, and the keyboard may have been put away since.
+    LaunchedEffect(state, state.opened) {
+        if (state.opened == 0) return@LaunchedEffect
+        runCatching { focus.requestFocus() }
+        view.context.getSystemService(InputMethodManager::class.java).showSoftInput(view, 0)
+    }
     DisposableEffect(state, list) {
         state.drawnIn(list)
         onDispose { state.drawnIn(null) }
+    }
+    // The screen under the text getting shorter — the keyboard coming up over a cursor put low on
+    // the screen, a turn to landscape — must not leave the cursor under it.
+    LaunchedEffect(list, state) {
+        var was = 0
+        snapshotFlow { list.layoutInfo.viewportSize.height }.collect { now ->
+            if (now in 1 until was) state.shrunk(was)
+            was = now
+        }
     }
     LaunchedEffect(state.generation) { list.scrollToItem(0) }
     LaunchedEffect(list, state) {
@@ -1292,7 +1507,16 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: 
     // The list takes no touches itself. [SelectionLayer] lies over it and takes all of them, the
     // scrolling included, since a selection's handles lie over the text and a touch on one is a
     // touch on both.
-    Box(modifier) {
+    //
+    // Focus, keys and the keyboard are the editor's as a whole and no row's, so that nothing a row
+    // does, the window being cut included, reaches any of them.
+    Box(
+        modifier
+            .then(KeyboardElement(state, clip))
+            .focusRequester(focus)
+            .onKeyEvent { event -> keys(event, state, clip, scope) }
+            .focusTarget(),
+    ) {
         LazyColumn(
             Modifier.fillMaxSize(),
             state = list,
@@ -1300,7 +1524,7 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: 
             overscrollEffect = overscroll,
         ) {
             items(rows.count, key = { rows.start(it) }) { index ->
-                if (rows.editable(index)) WindowRow(state, rows.start(index), clip)
+                if (rows.editable(index)) WindowRow(state)
                 else ChunkRow(state, rows.start(index), rows.end(index))
             }
             // Room to scroll the last line clear of the bottom edge. A touch on it is a touch below
@@ -1353,100 +1577,62 @@ private fun ChunkRow(state: DocumentState, start: Int, end: Int) {
     )
 }
 
-@Composable
-private fun WindowRow(state: DocumentState, start: Int, clip: Clip) {
-    val focus = remember { FocusRequester() }
-    val keyboard = LocalSoftwareKeyboardController.current
-    val scope = rememberCoroutineScope()
-    val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
-    val colors = LocalTextSelectionColors.current
-    val ground = colors.backgroundColor
-    val intercept = remember(state, clip) {
-        PlatformTextInputInterceptor { request, next ->
-            next.startInputMethod { info -> Connection(request.createInputConnection(info), state, clip) }
-        }
-    }
-    LaunchedEffect(state.opened, start) {
-        if (state.wantsFocus(start)) {
-            withFrameNanos { }
-            runCatching { focus.requestFocus() }
-            // Asking for focus raises the keyboard only where the field did not already have it,
-            // which is most of the time: the window is keyed on where it starts, so moving it
-            // composes a new field. A document of one empty line is the case where it does not
-            // move at all, and there a tap would put the cursor back with no keyboard under it.
-            keyboard?.show()
-        }
-    }
-    // The field holds the part of a selection the window covers, and is never to show it as its
-    // own: the mark is drawn under its text below, as the rows draw it, and the handles and the
-    // menu are the editor's. The field shows its own only in touch mode, and never hears a touch to
-    // leave it once told it is driven by keys.
-    CompositionLocalProvider(
-        LocalInputModeManager provides KeysOnly,
-        LocalTextSelectionColors provides TextSelectionColors(colors.handleColor, Color.Transparent),
-    ) {
-        InterceptPlatformTextInput(intercept) {
-            BasicTextField(
-                state = state.window,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .focusRequester(focus)
-                    .onFocusChanged { if (it.isFocused) state.focusTaken(start) }
-                    .onPreviewKeyEvent { event -> keys(event, state, clip, scope) }
-                    // The mark, drawn under the field's text the way the rows draw it under theirs.
-                    .drawWithCache {
-                        val path = state.markedInWindow()?.let { layout.value?.pathOf(it.min, it.max, state.markedPastWindow()) }
-                        onDrawBehind { if (path != null) drawPath(path, ground) }
-                    },
-                textStyle = LocalTextStyle.current.copy(color = LocalContentColor.current),
-                onTextLayout = { result ->
-                    result()?.let {
-                        state.laidOut(it)
-                        layout.value = it
-                    }
-                },
-                // No cursor while a selection stands, and an unspecified brush is also what stops
-                // the field scrolling to one: the ends of its selection are wherever the window cut
-                // the mark short, not anywhere the screen should go.
-                cursorBrush = SolidColor(if (state.marked == null) LocalContentColor.current else Color.Unspecified),
-            )
-        }
-    }
-}
-
-/** What the window's field is told about how it is driven: by keys only; see [WindowRow]. */
-private object KeysOnly : InputModeManager {
-    override val inputMode = InputMode.Keyboard
-
-    override fun requestInputMode(inputMode: InputMode) = inputMode == InputMode.Keyboard
-}
-
 /**
- * The keyboard's connection to the window's field, but for the keyboard asking the field to
- * select all, copy, cut or paste. Select all selects the document instead: the field would select
- * itself, which is the window and nothing past it. Copy, cut and paste are the editor's, answered
- * before the keyboard's next call: the field would answer them with a key, which arrives after
- * whatever the keyboard does next, and a keyboard that lets go of the selection straight after
- * copying it, as Samsung's does, leaves nothing to copy by then. Keyboards that send ctrl and a
- * letter instead reach [keys].
+ * The window: the row the cursor is in. Laid out read-only like any other row, since the keyboard
+ * talks to the document rather than to a text field, and drawing what a text field would draw for
+ * itself — the cursor, and a line under the word the keyboard is composing.
  */
-private class Connection(target: InputConnection, private val state: DocumentState, private val clip: Clip) :
-    InputConnectionWrapper(target, false) {
-
-    override fun performContextMenuAction(id: Int): Boolean {
-        when (id) {
-            android.R.id.selectAll -> state.selectAll(touched = false)
-            android.R.id.copy -> {
-                // Whatever the keyboard selected a moment ago is what is copied.
-                state.swallow()
-                clip.copy()
-            }
-            android.R.id.cut -> clip.cut()
-            android.R.id.paste -> clip.paste()
-            else -> return super.performContextMenuAction(id)
+@Composable
+private fun WindowRow(state: DocumentState) {
+    val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
+    val ground = LocalTextSelectionColors.current.backgroundColor
+    val ink = LocalContentColor.current
+    val text = state.window.text
+    val composing = state.compositionInWindow()
+    val shown = remember(text, composing) {
+        if (composing == null) AnnotatedString(text)
+        else buildAnnotatedString {
+            append(text)
+            addStyle(SpanStyle(textDecoration = TextDecoration.Underline), composing.min, composing.max)
         }
-        return true
     }
+    // The cursor blinks as a text field's does, and is drawn solid again whenever it moves or the
+    // text changes. None while a selection stands, or while the editor does not hold focus.
+    val blinking = state.focused && state.marked == null
+    var lit by remember { mutableStateOf(true) }
+    LaunchedEffect(blinking, text, state.window.selection) {
+        lit = true
+        if (!blinking) return@LaunchedEffect
+        while (true) {
+            delay(CURSOR_BLINK_MILLIS)
+            lit = !lit
+        }
+    }
+    BasicText(
+        text = shown,
+        modifier = Modifier
+            .fillMaxWidth()
+            // The mark, drawn under the text the way the rows draw it under theirs.
+            .drawWithCache {
+                val path = state.markedInWindow()?.let { layout.value?.pathOf(it.min, it.max, state.markedPastWindow()) }
+                onDrawBehind { if (path != null) drawPath(path, ground) }
+            }
+            .drawWithContent {
+                drawContent()
+                val result = layout.value
+                if (!blinking || !lit || result == null) return@drawWithContent
+                val at = state.window.selection.start.coerceIn(0, result.layoutInput.text.length)
+                val caret = result.getCursorRect(at)
+                val width = CURSOR_WIDTH.toPx()
+                val x = (caret.left + width / 2).coerceAtMost(size.width - width / 2)
+                drawLine(ink, Offset(x, caret.top), Offset(x, caret.bottom), width)
+            },
+        style = LocalTextStyle.current.copy(color = ink),
+        onTextLayout = { result ->
+            state.laidOut(result)
+            layout.value = result
+        },
+    )
 }
 
 /**
@@ -1491,22 +1677,37 @@ private fun stepOf(event: KeyEvent): Step? = when (event.key) {
 }
 
 /**
- * The keys that belong to the document rather than to the field.
+ * What a key types, or null when it types nothing: Enter a line break, Tab a tab, and anything
+ * else what the key's character map says, unless ctrl or meta make it a command.
+ */
+private fun typedBy(event: KeyEvent): String? {
+    if (event.isCtrlPressed || event.isMetaPressed) return null
+    when (event.key) {
+        Key.Enter, Key.NumPadEnter -> return "\n"
+        Key.Tab -> return "\t"
+    }
+    val code = event.utf16CodePoint
+    // A dead key, waiting for the letter it puts an accent on, types nothing yet.
+    if (code <= 0 || code and KeyCharacterMap.COMBINING_ACCENT != 0 || Character.isISOControl(code)) return null
+    return String(Character.toChars(code))
+}
+
+/**
+ * The keys: a hardware keyboard's, and those a keyboard on screen sends as keys rather than as text.
+ * There is no text field under the editor to answer any of them, so everything a field would do
+ * with a key is done here.
  *
- * Undo and redo, ctrl+Z and ctrl+Y, are taken before the field can answer them out of a history of
- * its own, which every cut of the window throws away and the document knows nothing about. They
- * belong to the change list, as the toolbar's buttons do. Select all, ctrl+A, selects the document
- * rather than the field. Copy, cut and paste, as ctrl and a letter or as keys of their own, are
- * the mark's and the editor's clipboard's, which refuses a copy too large to carry and survives a
- * clipboard too large to read.
+ * Undo and redo, ctrl+Z and ctrl+Y, belong to the change list, as the toolbar's buttons do. Select
+ * all, ctrl+A, selects the document. Copy, cut and paste, as ctrl and a letter or as keys of their
+ * own, are the mark's and the editor's clipboard's, which refuses a copy too large to carry and
+ * survives a clipboard too large to read.
  *
- * Shift and a key that moves the cursor carries the mark, wherever it goes, since the field could
- * carry it only as far as the window. Such a key without shift lets go of a selection, and is
- * otherwise the field's own cursor moving, but for a page and the document's ends, which the field
- * would take only as far as the window. Back lets go of a selection before it leaves anything.
+ * Shift and a key that moves the cursor carries the mark, wherever it goes. Such a key without
+ * shift lets go of a selection, and otherwise moves the cursor. Backspace and delete take out the
+ * mark, or a character or with ctrl a word. Back lets go of a selection before it leaves anything.
  *
- * Consumed whichever way they arrive, key up included, so nothing of them reaches the field.
- * Ctrl+shift+Z is taken as a redo too: it is what the other half of the world's keyboards send.
+ * Consumed whichever way they arrive, key up included. Ctrl+shift+Z is taken as a redo too: it is
+ * what the other half of the world's keyboards send.
  */
 private fun keys(event: KeyEvent, state: DocumentState, clip: Clip, scope: CoroutineScope): Boolean {
     val key = event.key
@@ -1517,17 +1718,17 @@ private fun keys(event: KeyEvent, state: DocumentState, clip: Clip, scope: Corou
     val paste = key == Key.Paste || ctrl && key == Key.V
     val history = ctrl && (key == Key.Y || key == Key.Z)
     val all = ctrl && key == Key.A
-    if (step == null && !copy && !cut && !paste && !history && !all && key != Key.Back) return false
-    // Whatever the keyboard selected a moment ago is what the key acts on.
-    state.swallow()
-    val marked = state.marked != null
-    val far = step == Step.PageUp || step == Step.PageDown || step == Step.Start || step == Step.End
-    val taken = when {
-        step != null -> event.isShiftPressed || marked || far
-        copy || cut || key == Key.Back -> marked
-        else -> true
+    val erase = when (key) {
+        Key.Backspace -> if (ctrl) Step.WordLeft else Step.Left
+        Key.Delete -> if (ctrl) Step.WordRight else Step.Right
+        else -> null
     }
-    if (!taken) return false
+    val typed = if (step == null && erase == null) typedBy(event) else null
+    if (step == null && erase == null && typed == null && !copy && !cut && !paste && !history && !all &&
+        key != Key.Back
+    ) return false
+    val marked = state.marked != null
+    if ((copy || cut || key == Key.Back) && !marked) return false
     // Back is let go of as it comes up, as a text field's own selection is, so the activity never
     // sees the half of it that would close it.
     if (key == Key.Back) {
@@ -1539,17 +1740,13 @@ private fun keys(event: KeyEvent, state: DocumentState, clip: Clip, scope: Corou
         step != null -> scope.launch(start = CoroutineStart.UNDISPATCHED) {
             if (event.isShiftPressed) state.select(step) else state.move(step)
         }
+        erase != null -> scope.launch(start = CoroutineStart.UNDISPATCHED) { state.erase(erase) }
+        typed != null -> state.typeText(typed)
         history -> scope.launch { if (key == Key.Y || event.isShiftPressed) state.redo() else state.undo() }
         all -> state.selectAll(touched = false)
         copy -> clip.copy()
         cut -> clip.cut()
         paste -> clip.paste()
     }
-    return true
-}
-
-/** Whether [count] characters of this from [at] are those of [other] from [from]. */
-private fun CharSequence.same(at: Int, other: CharSequence, from: Int, count: Int): Boolean {
-    for (i in 0 until count) if (this[at + i] != other[from + i]) return false
     return true
 }
