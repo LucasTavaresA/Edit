@@ -503,10 +503,10 @@ private fun Editor(opened: Uri? = null) {
                 Modifier.fillMaxWidth().windowInsetsPadding(safe.only(WindowInsetsSides.Bottom)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                Op("Save", enabled = file != null) { save() }
                 Op("All") { document.selectAll() }
                 Op("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
                 Op("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
-                Op("Save", enabled = file != null) { save() }
             }
         }
     }
