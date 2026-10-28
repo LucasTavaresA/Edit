@@ -385,15 +385,24 @@ class DocumentState(spill: File?) : Closeable {
         }
     }
 
-    /** Puts the cursor at [offset], moving the window there. The offset is the document's bytes. */
+    /**
+     * Puts the cursor at [offset], moving the window there. The offset is where the rows have it,
+     * which past a window holding typing is not yet where the document does.
+     *
+     * Committing that typing moves the start of every row past the window, and rows are keyed on
+     * where they start, so the list loses the row it holds its place by and falls back on its
+     * number, which the window moving has changed: the text jumps, and the cursor is then pulled
+     * back from wherever it went. So the place is held by hand, and the nudge [reach] makes comes
+     * before the commit, while the list still draws the rows it reads.
+     */
     suspend fun focus(offset: Int) {
-        val at = shifted(offset)
         unmark()
+        reach(chunkIndexAt(chunks, offset.coerceIn(0, length)))
+        val at = shifted(offset)
         commit()
-        val to = at.coerceIn(0, content.length)
-        reach(chunkIndexAt(chunks, to))
-        open(to)
+        open(at.coerceIn(0, content.length))
         opened++
+        list?.let { it.requestScrollToItem(rowsNow().rowAt(visibleFrom), it.firstVisibleItemScrollOffset) }
         changed()
     }
 
@@ -1157,6 +1166,17 @@ class DocumentState(spill: File?) : Closeable {
         canRedo = content.canRedo
     }
 
+    /**
+     * What the row from [start] to [end] holds, in the rows' own offsets. Past the window the
+     * document is ahead of the rows by whatever has been recorded since the last commit, so a row
+     * laid out for the first time in between, as scrolling brings it on screen, has to read that much
+     * further on, or it draws the tail of the row before it again.
+     */
+    fun rowText(start: Int, end: Int): Slice {
+        val moved = if (windowStart >= 0 && start >= windowEnd) recorded else 0
+        return content.slice(start + moved, end + moved)
+    }
+
     /** An offset past an open window has moved by whatever the window's own length has changed by. */
     private fun shifted(offset: Int): Int {
         if (windowStart < 0 || offset < windowEnd) return offset
@@ -1541,7 +1561,7 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: 
 private fun ChunkRow(state: DocumentState, start: Int, end: Int) {
     val version = state.version
     val slice = remember(version, start, end) {
-        val full = state.content.slice(start, end)
+        val full = state.rowText(start, end)
         full.dropLast(trailingBreak(full.text))
     }
     val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
