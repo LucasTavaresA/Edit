@@ -1113,17 +1113,28 @@ class DocumentState(spill: File?) : Closeable {
      */
     private suspend fun showCursor() {
         val list = this.list ?: return
+        // Where the cursor is drawn can only be read off a layout of what the window holds now, and
+        // a window just opened somewhere else may not have one yet: a row off screen is never laid
+        // out until it is gone to, and one on screen is laid out again only in the next frame. The
+        // last layout is then another text's, and scrolling by it lands wherever its lines were.
+        var tries = 3
+        while (true) {
+            val row = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == windowStart }
+            val fresh = layout?.layoutInput?.text?.text?.contentEquals(window.text) == true
+            if (row != null && fresh) break
+            if (tries-- == 0) return
+            if (row == null) list.scrollToItem(rowsNow().rowAt(windowStart))
+            withFrameNanos { }
+            if (windowStart < 0) return
+        }
         val layout = this.layout ?: return
         val viewport = list.layoutInfo.viewportSize.height
         if (viewport <= 0) return
         val line = layout.getLineForOffset(window.selection.max.coerceIn(0, layout.layoutInput.text.length))
         val top = layout.getLineTop(line).toInt()
         val bottom = layout.getLineBottom(line).toInt()
-        val row = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == windowStart }
-        if (row == null) {
-            // Not on screen at all, so there is nothing to scroll by — go to it instead.
-            list.scrollToItem(rowsNow().rowAt(windowStart), (top - viewport / 3).coerceAtLeast(0))
-        } else if (row.offset + top < 0) {
+        val row = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == windowStart } ?: return
+        if (row.offset + top < 0) {
             list.scrollBy((row.offset + top - viewport / 4).toFloat())
         } else if (row.offset + bottom > viewport) {
             list.scrollBy((row.offset + bottom - viewport + viewport / 4).toFloat())
