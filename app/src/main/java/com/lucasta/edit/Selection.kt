@@ -1,8 +1,18 @@
 package com.lucasta.edit
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.text.SpannableString
+import android.text.style.URLSpan
+import android.text.util.Linkify
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
 import androidx.compose.foundation.OverscrollEffect
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -44,7 +54,7 @@ import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalTextToolbar
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
@@ -86,6 +96,8 @@ private val GRAB = 12.dp
  * so the platform's handles, magnifier and menu, which belong to a field and reach no further than
  * one, are replaced here: the handles are drawn over the rows, the magnifier is the platform's own
  * widget pointed at them, and the menu is the platform's floating toolbar, asked for directly.
+ * A long press on a link adds opening it and selecting the whole of it to the menu; [refuse] says
+ * so when nothing on the phone opens it.
  *
  * The list scrolls under it through [scrollable], which is what the list itself would have done
  * with the touch, and with the list's own [overscroll]. Two fingers are a pinch, handed to [zoom]
@@ -98,11 +110,15 @@ internal fun SelectionLayer(
     overscroll: OverscrollEffect?,
     clip: Clip,
     zoom: (Float, Offset) -> Unit,
+    refuse: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val pinched by rememberUpdatedState(zoom)
+    val refusal by rememberUpdatedState(refuse)
     val handles = LocalTextSelectionColors.current.handleColor
-    val toolbar = LocalTextToolbar.current
+    val context = LocalContext.current
+    val view = LocalView.current
+    val toolbar = remember(view) { TextMenu(view) }
     val haptics = LocalHapticFeedback.current
     val placed = remember { arrayOfNulls<LayoutCoordinates>(1) }
     var pressed by remember { mutableStateOf(false) }
@@ -110,6 +126,9 @@ internal fun SelectionLayer(
     // The window's cursor as it was when the menu that offers to paste was asked for at it, and
     // null when it was not, or the cursor has moved since.
     var cursorMenu by remember { mutableStateOf<TextRange?>(null) }
+    // The link the last long press landed on, which the menu offers for as long as the selection
+    // stays inside it, or the cursor that press left stays where it was.
+    var link by remember { mutableStateOf<WebLink?>(null) }
 
     LaunchedEffect(state) {
         snapshotFlow { state.window.selection }.collect { if (it != cursorMenu) cursorMenu = null }
@@ -120,10 +139,12 @@ internal fun SelectionLayer(
     // none; see [DocumentState.touched].
     LaunchedEffect(state, list, toolbar) {
         snapshotFlow {
+            val mark = state.marked
+            val near = link?.takeIf { if (mark != null) mark.min >= it.range.min && mark.max <= it.range.max else cursorMenu != null }
             when {
                 pressed || list.isScrollInProgress -> null
-                state.marked != null -> if (state.touched) selectionRect(state, list)?.let { it to true } else null
-                cursorMenu != null -> state.cursorCaret()?.let { it to false }
+                mark != null -> if (state.touched) selectionRect(state, list)?.let { Triple(it, true, near) } else null
+                cursorMenu != null -> state.cursorCaret()?.let { Triple(it, false, near) }
                 else -> null
             }
         }.collect { menu ->
@@ -132,27 +153,30 @@ internal fun SelectionLayer(
                 toolbar.hide()
                 return@collect
             }
-            val (rect, selection) = menu
+            val (rect, selection, found) = menu
             val root = Rect(where.localToRoot(rect.topLeft), rect.size)
-            val paste = if (clip.hasText) ({ clip.paste(); cursorMenu = null }) else null
-            if (selection) {
-                toolbar.showMenu(
-                    rect = root,
-                    onCopyRequested = { if (clip.copy()) state.deselect() },
-                    onPasteRequested = paste,
-                    onCutRequested = { clip.cut() },
-                    onSelectAllRequested = { state.selectAll() },
-                )
-            } else {
-                toolbar.showMenu(
-                    rect = root,
-                    onPasteRequested = paste,
-                    onSelectAllRequested = {
-                        cursorMenu = null
-                        state.selectAll()
-                    },
-                )
+            val items = mutableListOf<Pair<String, () -> Unit>>()
+            if (found != null) {
+                items += "Open link" to {
+                    try {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(found.url)))
+                    } catch (e: ActivityNotFoundException) {
+                        refusal("could not open ${found.url}: nothing on the phone opens it")
+                    }
+                }
+                if (state.marked != found.range) items += "Select link" to {
+                    cursorMenu = null
+                    state.mark(found.range)
+                }
             }
+            if (selection) items += context.getString(android.R.string.copy) to { if (clip.copy()) state.deselect() }
+            if (clip.hasText) items += context.getString(android.R.string.paste) to { clip.paste(); cursorMenu = null }
+            if (selection) items += context.getString(android.R.string.cut) to { clip.cut() }
+            items += context.getString(android.R.string.selectAll) to {
+                cursorMenu = null
+                state.selectAll()
+            }
+            toolbar.show(root, items)
         }
     }
     DisposableEffect(toolbar) { onDispose { toolbar.hide() } }
@@ -205,6 +229,7 @@ internal fun SelectionLayer(
                                 Press.Scroll -> if (another()) pinch(pinched)
                                 Press.Pinch -> pinch(pinched)
                                 Press.Tap -> {
+                                    link = null
                                     val spot = state.spotAt(down.position) ?: return@awaitEachGesture
                                     // Tapping the cursor where it already is asks for the menu that
                                     // offers to paste, as in any text field, and tapping it again
@@ -217,8 +242,12 @@ internal fun SelectionLayer(
                                     }
                                 }
                                 Press.Long -> {
+                                    link = null
                                     val spot = state.spotAt(down.position) ?: return@awaitEachGesture
                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    link = linkAt(spot.text, spot.char)?.let { (range, url) ->
+                                        WebLink(TextRange(state.offsetOf(spot, range.start), state.offsetOf(spot, range.end)), url)
+                                    }
                                     val word = wordAt(spot.text, spot.char)
                                     if (word.collapsed) {
                                         // Nothing to select: the cursor goes there, with the menu
@@ -460,6 +489,66 @@ private fun wordAt(text: CharSequence, offset: Int): TextRange {
 
 /** What a word is made of, for a long press and for a step a word at a time alike. */
 internal fun isWord(char: Char) = char.isLetterOrDigit() || char == '_'
+
+/** A link in the document: where it is, and the address it opens, scheme and all. */
+private class WebLink(val range: TextRange, val url: String)
+
+/**
+ * The web address [offset] is in or next to, and what it opens, found the way a text field finds
+ * the links it makes tappable. A bare address is given the scheme it would open with.
+ */
+private fun linkAt(text: CharSequence, offset: Int): Pair<TextRange, String>? {
+    val spans = SpannableString(text)
+    if (!Linkify.addLinks(spans, Linkify.WEB_URLS)) return null
+    val span = spans.getSpans(offset, offset, URLSpan::class.java).firstOrNull() ?: return null
+    return TextRange(spans.getSpanStart(span), spans.getSpanEnd(span)) to span.url
+}
+
+/**
+ * The platform's floating menu over [view], shown the way Compose's own text toolbar shows it.
+ * That one offers only its fixed four items and a link wants two more, so the menu is asked of the
+ * view directly. Showing it while it is up moves it and gives it the new items; picking one runs
+ * it and puts the menu away.
+ */
+private class TextMenu(private val view: View) : ActionMode.Callback2() {
+    private var mode: ActionMode? = null
+    private val rect = android.graphics.Rect()
+    private var items: List<Pair<String, () -> Unit>> = emptyList()
+
+    /** Shows [items] around [rect], in the coordinates of the root, which is [view]. */
+    fun show(rect: Rect, items: List<Pair<String, () -> Unit>>) {
+        this.rect.set(rect.left.toInt(), rect.top.toInt(), rect.right.toInt(), rect.bottom.toInt())
+        this.items = items
+        mode?.invalidate() ?: run { mode = view.startActionMode(this, ActionMode.TYPE_FLOATING) }
+    }
+
+    fun hide() {
+        mode?.finish()
+        mode = null
+    }
+
+    override fun onCreateActionMode(mode: ActionMode, menu: Menu) = onPrepareActionMode(mode, menu)
+
+    override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean {
+        menu.clear()
+        items.forEachIndexed { i, (title, _) -> menu.add(Menu.NONE, i, i, title) }
+        return true
+    }
+
+    override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
+        items.getOrNull(item.itemId)?.second?.invoke()
+        mode.finish()
+        return true
+    }
+
+    override fun onDestroyActionMode(mode: ActionMode) {
+        if (mode == this.mode) this.mode = null
+    }
+
+    override fun onGetContentRect(mode: ActionMode, view: View, outRect: android.graphics.Rect) {
+        outRect.set(rect)
+    }
+}
 
 /**
  * The clipboard, as the editor's selection uses it. Copying and cutting refuse a selection over

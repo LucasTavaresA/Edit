@@ -1543,7 +1543,7 @@ private fun TextUnit.scaled(by: Float): TextUnit = if (isSpecified) this * by el
  *   field's padding is, so a touch on it lands on the text: at the start of a line on the left, at
  *   its end on the right.
  * @param refuse says why something asked for was not done, which today is a copy or a cut larger
- *   than the clipboard takes.
+ *   than the clipboard takes, or a link nothing on the phone opens.
  * @param scale how large the text is drawn against the theme's size, and [rescale] is asked for
  *   another whenever a pinch takes it a step further.
  */
@@ -1674,7 +1674,7 @@ fun DocumentEditor(
                 }
             }
         }
-        SelectionLayer(state, list, overscroll, clip, pinch, Modifier.matchParentSize())
+        SelectionLayer(state, list, overscroll, clip, pinch, refuse, Modifier.matchParentSize())
     }
 }
 
