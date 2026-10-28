@@ -47,6 +47,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -222,6 +223,9 @@ private val turns = Mutex()
  */
 private const val LAST = "last"
 
+/** Where how the text looks is written down: the size a pinch left it at, for every file alike. */
+private const val LOOKS = "looks"
+
 /**
  * The file that was open when Edit last stopped, and what it was called. The name is kept because
  * it cannot be asked for once the file's access has gone, which is exactly when it needs saying.
@@ -284,6 +288,8 @@ private fun Editor(opened: Uri? = null) {
     var notice by remember { mutableStateOf(Notice(NO_FILE, Hold.Never)) }
     var touches by remember { mutableIntStateOf(0) }
     var asking by remember { mutableStateOf(false) }
+    val looks = remember { context.getSharedPreferences(LOOKS, Context.MODE_PRIVATE) }
+    var scale by remember { mutableFloatStateOf(looks.getFloat("scale", 1f)) }
 
     /**
      * Whether a save is waiting for its turn. Pressing Save again joins it rather than queueing
@@ -479,6 +485,11 @@ private fun Editor(opened: Uri? = null) {
             modifier = Modifier.fillMaxWidth().weight(1f),
             margin = 12.dp,
             refuse = { say(it, Hold.UntilSeen) },
+            scale = scale,
+            rescale = {
+                scale = it
+                looks.edit().putFloat("scale", it).apply()
+            },
         )
         HorizontalDivider(thickness = pixel)
         // What these undo is the sentence being typed, and saving ends it, so this row rides on top

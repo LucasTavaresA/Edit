@@ -20,6 +20,7 @@ import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -61,10 +62,13 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.ResolvedTextDirection
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import java.io.Closeable
 import java.io.File
 import java.text.BreakIterator
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -120,6 +124,15 @@ private val TAIL = 160.dp
 private val CURSOR_WIDTH = 2.dp
 
 private const val CURSOR_BLINK_MILLIS = 500L
+
+/**
+ * How far a pinch may take the text from the theme's size either way, and the steps it goes in:
+ * every step lays out the rows on screen again, so a pinch moves through a few dozen of them
+ * rather than one a frame.
+ */
+private const val SCALE_MIN = 0.5f
+private const val SCALE_MAX = 3f
+private const val SCALE_STEP = 1 / 32f
 
 /**
  * The document, plus the slice of it that is currently editable.
@@ -959,6 +972,17 @@ class DocumentState(spill: File?) : Closeable {
         return caret(row.layout, row.slice.charAt(offset - (item.key as Int)), item.offset)
     }
 
+    /**
+     * How far down the editor the line holding [char] of the row starting at [row] begins, or null
+     * when that row is not on screen as the document stands.
+     */
+    fun lineTop(row: Int, char: Int): Float? {
+        val item = list?.layoutInfo?.visibleItemsInfo?.firstOrNull { it.key == row } ?: return null
+        val layout = drawnAt(row)?.layout ?: return null
+        val at = char.coerceIn(0, layout.layoutInput.text.length)
+        return item.offset + layout.getLineTop(layout.getLineForOffset(at))
+    }
+
     /** The row drawing the byte at [offset] and where the list has it, while it is on screen. */
     private fun rowOf(offset: Int): Pair<LazyListItemInfo, Drawn>? {
         val items = list?.layoutInfo?.visibleItemsInfo ?: return null
@@ -1494,11 +1518,34 @@ class Drawn(val version: Int, val end: Int, val slice: Slice, val layout: TextLa
 class Spot(val row: Int, val char: Int, val text: CharSequence, val slice: Slice?)
 
 /**
+ * Pinching the text to another size. [wanted] is where the fingers have taken the scale and
+ * [scale] where that last came to a step; [anchor] is the text they hold, until the rows are laid
+ * out at the new size and it can be put back under them.
+ */
+private class Zoom(var scale: Float) {
+    var wanted = scale
+    var anchor: Anchor? = null
+}
+
+/**
+ * The text a pinch holds: [char] of the row starting at [row], which was [below] under the top of
+ * its line with the fingers at [at] down the screen, and how much the text has [grown] since.
+ */
+private class Anchor(val row: Int, val char: Int, val at: Float, val below: Float) {
+    var grown = 1f
+}
+
+/** This size [by] times over, or left unspecified, which has no size to multiply. */
+private fun TextUnit.scaled(by: Float): TextUnit = if (isSpecified) this * by else this
+
+/**
  * @param margin how far in from either side the text is drawn. It is the editor's own, as a text
  *   field's padding is, so a touch on it lands on the text: at the start of a line on the left, at
  *   its end on the right.
  * @param refuse says why something asked for was not done, which today is a copy or a cut larger
  *   than the clipboard takes.
+ * @param scale how large the text is drawn against the theme's size, and [rescale] is asked for
+ *   another whenever a pinch takes it a step further.
  */
 @Composable
 fun DocumentEditor(
@@ -1506,6 +1553,8 @@ fun DocumentEditor(
     modifier: Modifier = Modifier,
     margin: Dp = 0.dp,
     refuse: (String) -> Unit = {},
+    scale: Float = 1f,
+    rescale: (Float) -> Unit = {},
 ) {
     val rows = remember(state.version, state.chunks, state.windowStart, state.windowEnd) {
         Rows(state.chunks, state.length, state.windowStart, state.windowEnd)
@@ -1517,6 +1566,45 @@ fun DocumentEditor(
     val scope = rememberCoroutineScope()
     val view = LocalView.current
     val inset = with(LocalDensity.current) { margin.toPx() }
+    val base = LocalTextStyle.current
+    val style = remember(base, scale) {
+        base.copy(
+            fontSize = base.fontSize.scaled(scale),
+            lineHeight = base.lineHeight.scaled(scale),
+            letterSpacing = base.letterSpacing.scaled(scale),
+        )
+    }
+    val zoom = remember(list) { Zoom(scale) }
+    // The text under the fingers stays under them. How far the text above it moves is not how much
+    // the text grew, since its lines wrap again at the new size, so the line itself is followed: its
+    // row is held where it starts on screen while the rows are laid out again, which keeps it on
+    // screen however much the rows above it change, and then the list is scrolled to put the line
+    // back under the fingers.
+    LaunchedEffect(zoom, scale) {
+        withFrameNanos {}
+        val anchor = zoom.anchor ?: return@LaunchedEffect
+        zoom.anchor = null
+        val top = state.lineTop(anchor.row, anchor.char) ?: return@LaunchedEffect
+        list.scrollBy(top + anchor.below * anchor.grown - anchor.at)
+    }
+    val pinch = { by: Float, at: Offset ->
+        zoom.wanted = (zoom.wanted * by).coerceIn(SCALE_MIN, SCALE_MAX)
+        val next = (zoom.wanted / SCALE_STEP).roundToInt() * SCALE_STEP
+        if (next != zoom.scale) {
+            if (zoom.anchor == null) {
+                val spot = state.spotAt(at)
+                val item = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == spot?.row }
+                val top = spot?.let { state.lineTop(it.row, it.char) }
+                if (item != null && top != null) {
+                    list.requestScrollToItem(item.index, -item.offset)
+                    zoom.anchor = Anchor(spot.row, spot.char, at.y, at.y - top)
+                }
+            }
+            zoom.anchor?.let { it.grown *= next / zoom.scale }
+            zoom.scale = next
+            rescale(next)
+        }
+    }
     // The user putting the cursor somewhere brings the keyboard up. Taking focus does that on its
     // own, but the editor usually holds it already, and the keyboard may have been put away since.
     LaunchedEffect(state, state.opened) {
@@ -1567,24 +1655,26 @@ fun DocumentEditor(
             .onKeyEvent { event -> keys(event, state, clip, scope) }
             .focusTarget(),
     ) {
-        LazyColumn(
-            Modifier.fillMaxSize(),
-            state = list,
-            contentPadding = PaddingValues(horizontal = margin),
-            userScrollEnabled = false,
-            overscrollEffect = overscroll,
-        ) {
-            items(rows.count, key = { rows.start(it) }) { index ->
-                if (rows.editable(index)) WindowRow(state)
-                else ChunkRow(state, rows.start(index), rows.end(index))
-            }
-            // Room to scroll the last line clear of the bottom edge. A touch on it is a touch below
-            // the last row, which is the end of the document.
-            item(key = "tail") {
-                Spacer(Modifier.fillMaxWidth().height(TAIL))
+        CompositionLocalProvider(LocalTextStyle provides style) {
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                state = list,
+                contentPadding = PaddingValues(horizontal = margin),
+                userScrollEnabled = false,
+                overscrollEffect = overscroll,
+            ) {
+                items(rows.count, key = { rows.start(it) }) { index ->
+                    if (rows.editable(index)) WindowRow(state)
+                    else ChunkRow(state, rows.start(index), rows.end(index))
+                }
+                // Room to scroll the last line clear of the bottom edge. A touch on it is a touch
+                // below the last row, which is the end of the document.
+                item(key = "tail") {
+                    Spacer(Modifier.fillMaxWidth().height(TAIL))
+                }
             }
         }
-        SelectionLayer(state, list, overscroll, clip, Modifier.matchParentSize())
+        SelectionLayer(state, list, overscroll, clip, pinch, Modifier.matchParentSize())
     }
 }
 

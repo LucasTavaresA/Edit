@@ -7,6 +7,8 @@ import androidx.compose.foundation.OverscrollEffect
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.scrollable
 import androidx.compose.foundation.layout.Box
@@ -86,7 +88,8 @@ private val GRAB = 12.dp
  * widget pointed at them, and the menu is the platform's floating toolbar, asked for directly.
  *
  * The list scrolls under it through [scrollable], which is what the list itself would have done
- * with the touch, and with the list's own [overscroll].
+ * with the touch, and with the list's own [overscroll]. Two fingers are a pinch, handed to [zoom]
+ * as how much each move spread them or drew them together and the point between them.
  */
 @Composable
 internal fun SelectionLayer(
@@ -94,8 +97,10 @@ internal fun SelectionLayer(
     list: LazyListState,
     overscroll: OverscrollEffect?,
     clip: Clip,
+    zoom: (Float, Offset) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val pinched by rememberUpdatedState(zoom)
     val handles = LocalTextSelectionColors.current.handleColor
     val toolbar = LocalTextToolbar.current
     val haptics = LocalHapticFeedback.current
@@ -195,7 +200,10 @@ internal fun SelectionLayer(
                                 return@awaitEachGesture
                             }
                             when (press(down)) {
-                                Press.Scroll -> Unit
+                                // A second finger can come down after the first has started
+                                // scrolling, and that is a pinch too.
+                                Press.Scroll -> if (another()) pinch(pinched)
+                                Press.Pinch -> pinch(pinched)
                                 Press.Tap -> {
                                     val spot = state.spotAt(down.position) ?: return@awaitEachGesture
                                     // Tapping the cursor where it already is asks for the menu that
@@ -255,17 +263,23 @@ internal fun SelectionLayer(
 }
 
 /** What a touch that is not on a handle turns out to be. */
-private enum class Press { Tap, Long, Scroll }
+private enum class Press { Tap, Long, Scroll, Pinch }
 
 /**
  * Lifted soon enough is a tap, held still long enough is a long press, and moved first is a
  * scroll, which is the list's: nothing is consumed here, so the scrollable takes it as its own.
+ * Another finger coming down before any of that is a pinch.
  */
 private suspend fun AwaitPointerEventScope.press(down: PointerInputChange): Press {
     var press = Press.Long
     withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
         while (true) {
-            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+            val event = awaitPointerEvent()
+            if (event.changes.count { it.pressed } > 1) {
+                press = Press.Pinch
+                break
+            }
+            val change = event.changes.firstOrNull { it.id == down.id }
             if (change == null) {
                 press = Press.Scroll
                 break
@@ -281,6 +295,37 @@ private suspend fun AwaitPointerEventScope.press(down: PointerInputChange): Pres
         }
     }
     return press
+}
+
+/**
+ * Waits out a touch the list is scrolling, and says whether another finger came down before the
+ * last one lifted.
+ */
+private suspend fun AwaitPointerEventScope.another(): Boolean {
+    while (true) {
+        val down = awaitPointerEvent().changes.count { it.pressed }
+        if (down > 1) return true
+        if (down == 0) return false
+    }
+}
+
+/**
+ * Follows the fingers until the last of them lifts, handing [zoom] each move made with two or more
+ * down. Every move is taken, so the list never sees one as a scroll, and a scroll already under way
+ * stops; once a finger lifts the one left down is still taken, rather than setting the text
+ * scrolling out from under a pinch.
+ */
+private suspend fun AwaitPointerEventScope.pinch(zoom: (Float, Offset) -> Unit) {
+    while (true) {
+        val event = awaitPointerEvent()
+        val down = event.changes.count { it.pressed }
+        if (down == 0) break
+        if (down > 1) {
+            val by = event.calculateZoom()
+            if (by != 1f) zoom(by, event.calculateCentroid())
+        }
+        event.changes.forEach { it.consume() }
+    }
 }
 
 /**
