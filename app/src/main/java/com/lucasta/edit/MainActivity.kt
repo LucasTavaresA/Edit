@@ -476,7 +476,8 @@ private fun Editor(opened: Uri? = null) {
         }
         DocumentEditor(
             state = document,
-            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            margin = 12.dp,
             refuse = { say(it, Hold.UntilSeen) },
         )
         HorizontalDivider(thickness = pixel)

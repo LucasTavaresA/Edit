@@ -5,6 +5,7 @@ import android.view.KeyCharacterMap
 import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,6 +51,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.utf16CodePoint
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -58,6 +60,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.ResolvedTextDirection
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import java.io.Closeable
 import java.io.File
@@ -321,11 +324,18 @@ class DocumentState(spill: File?) : Closeable {
     /** The list the rows are drawn in, so the window can make room for itself before it moves. */
     private var list: LazyListState? = null
 
+    /**
+     * The margin the rows are drawn in from either side, in pixels. The editor's own coordinates
+     * take it in, so a touch on it is a touch on the text, and a row's do not.
+     */
+    private var inset = 0f
+
     /** The window's last text layout, which is the only thing that knows where the cursor is drawn. */
     private var layout: TextLayoutResult? = null
 
-    fun drawnIn(list: LazyListState?) {
+    fun drawnIn(list: LazyListState?, inset: Float = 0f) {
         this.list = list
+        this.inset = inset
     }
 
     fun laidOut(result: TextLayoutResult) {
@@ -894,7 +904,7 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
-     * Which character of which row is drawn at [position], in the list's own coordinates, or null
+     * Which character of which row is drawn at [position], in the editor's own coordinates, or null
      * when the screen is not showing the document as it stands: the frame after it changed, before
      * the rows have caught up. Anything below the last row is the end of it, which is what a touch
      * on the empty screen under a short document means.
@@ -907,7 +917,7 @@ class DocumentState(spill: File?) : Closeable {
         val row = drawnAt(start) ?: return null
         val text = row.layout.layoutInput.text
         val char = if (y >= item.offset + item.size) text.length
-        else row.layout.getOffsetForPosition(Offset(position.x, y - item.offset))
+        else row.layout.getOffsetForPosition(Offset(position.x - inset, y - item.offset))
         return Spot(start, char, text, if (start == windowStart) null else row.slice)
     }
 
@@ -941,7 +951,7 @@ class DocumentState(spill: File?) : Closeable {
 
     /**
      * Where the caret before the byte at [offset] is drawn, as a rect a line high and of no width in
-     * the list's own coordinates, or null when its row is not on screen. Meant for the ends of the
+     * the editor's own coordinates, or null when its row is not on screen. Meant for the ends of the
      * mark, which is when the rows are in step with the document.
      */
     fun caretAt(offset: Int): Rect? {
@@ -959,7 +969,7 @@ class DocumentState(spill: File?) : Closeable {
         return item to row
     }
 
-    /** Where the cursor is drawn, in the list's own coordinates, or null when it is not. */
+    /** Where the cursor is drawn, in the editor's own coordinates, or null when it is not. */
     fun cursorCaret(): Rect? {
         if (windowStart < 0) return null
         val item = list?.layoutInfo?.visibleItemsInfo?.firstOrNull { it.key == windowStart } ?: return null
@@ -970,7 +980,7 @@ class DocumentState(spill: File?) : Closeable {
     private fun caret(layout: TextLayoutResult, char: Int, top: Int): Rect {
         val at = char.coerceIn(0, layout.layoutInput.text.length)
         val line = layout.getLineForOffset(at)
-        val x = layout.getHorizontalPosition(at, usePrimaryDirection = true)
+        val x = inset + layout.getHorizontalPosition(at, usePrimaryDirection = true)
         return Rect(x, top + layout.getLineTop(line), x, top + layout.getLineBottom(line))
     }
 
@@ -1484,11 +1494,19 @@ class Drawn(val version: Int, val end: Int, val slice: Slice, val layout: TextLa
 class Spot(val row: Int, val char: Int, val text: CharSequence, val slice: Slice?)
 
 /**
+ * @param margin how far in from either side the text is drawn. It is the editor's own, as a text
+ *   field's padding is, so a touch on it lands on the text: at the start of a line on the left, at
+ *   its end on the right.
  * @param refuse says why something asked for was not done, which today is a copy or a cut larger
  *   than the clipboard takes.
  */
 @Composable
-fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: (String) -> Unit = {}) {
+fun DocumentEditor(
+    state: DocumentState,
+    modifier: Modifier = Modifier,
+    margin: Dp = 0.dp,
+    refuse: (String) -> Unit = {},
+) {
     val rows = remember(state.version, state.chunks, state.windowStart, state.windowEnd) {
         Rows(state.chunks, state.length, state.windowStart, state.windowEnd)
     }
@@ -1498,6 +1516,7 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: 
     val focus = remember { FocusRequester() }
     val scope = rememberCoroutineScope()
     val view = LocalView.current
+    val inset = with(LocalDensity.current) { margin.toPx() }
     // The user putting the cursor somewhere brings the keyboard up. Taking focus does that on its
     // own, but the editor usually holds it already, and the keyboard may have been put away since.
     LaunchedEffect(state, state.opened) {
@@ -1505,8 +1524,8 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: 
         runCatching { focus.requestFocus() }
         view.context.getSystemService(InputMethodManager::class.java).showSoftInput(view, 0)
     }
-    DisposableEffect(state, list) {
-        state.drawnIn(list)
+    DisposableEffect(state, list, inset) {
+        state.drawnIn(list, inset)
         onDispose { state.drawnIn(null) }
     }
     // The screen under the text getting shorter — the keyboard coming up over a cursor put low on
@@ -1551,6 +1570,7 @@ fun DocumentEditor(state: DocumentState, modifier: Modifier = Modifier, refuse: 
         LazyColumn(
             Modifier.fillMaxSize(),
             state = list,
+            contentPadding = PaddingValues(horizontal = margin),
             userScrollEnabled = false,
             overscrollEffect = overscroll,
         ) {
