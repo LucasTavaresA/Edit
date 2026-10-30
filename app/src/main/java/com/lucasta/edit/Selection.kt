@@ -96,8 +96,8 @@ private val GRAB = 12.dp
  * so the platform's handles, magnifier and menu, which belong to a field and reach no further than
  * one, are replaced here: the handles are drawn over the rows, the magnifier is the platform's own
  * widget pointed at them, and the menu is the platform's floating toolbar, asked for directly.
- * A long press on a link adds opening it and selecting the whole of it to the menu; [refuse] says
- * so when nothing on the phone opens it.
+ * A long press on a link or an email address adds opening it and selecting the whole of it to the
+ * menu; [refuse] says so when nothing on the phone opens it.
  *
  * The list scrolls under it through [scrollable], which is what the list itself would have done
  * with the touch, and with the list's own [overscroll]. Two fingers are a pinch, handed to [zoom]
@@ -128,7 +128,7 @@ internal fun SelectionLayer(
     var cursorMenu by remember { mutableStateOf<TextRange?>(null) }
     // The link the last long press landed on, which the menu offers for as long as the selection
     // stays inside it, or the cursor that press left stays where it was.
-    var link by remember { mutableStateOf<WebLink?>(null) }
+    var link by remember { mutableStateOf<TextLink?>(null) }
 
     LaunchedEffect(state) {
         snapshotFlow { state.window.selection }.collect { if (it != cursorMenu) cursorMenu = null }
@@ -157,14 +157,14 @@ internal fun SelectionLayer(
             val root = Rect(where.localToRoot(rect.topLeft), rect.size)
             val items = mutableListOf<Pair<String, () -> Unit>>()
             if (found != null) {
-                items += "Open link" to {
+                items += "Open ${found.kind}" to {
                     try {
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(found.url)))
                     } catch (e: ActivityNotFoundException) {
                         refusal("could not open ${found.url}: nothing on the phone opens it")
                     }
                 }
-                if (state.marked != found.range) items += "Select link" to {
+                if (state.marked != found.range) items += "Select ${found.kind}" to {
                     cursorMenu = null
                     state.mark(found.range)
                 }
@@ -246,7 +246,7 @@ internal fun SelectionLayer(
                                     val spot = state.spotAt(down.position) ?: return@awaitEachGesture
                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                     link = linkAt(spot.text, spot.char)?.let { (range, url) ->
-                                        WebLink(TextRange(state.offsetOf(spot, range.start), state.offsetOf(spot, range.end)), url)
+                                        TextLink(TextRange(state.offsetOf(spot, range.start), state.offsetOf(spot, range.end)), url)
                                     }
                                     val word = wordAt(spot.text, spot.char)
                                     if (word.collapsed) {
@@ -491,15 +491,18 @@ private fun wordAt(text: CharSequence, offset: Int): TextRange {
 internal fun isWord(char: Char) = char.isLetterOrDigit() || char == '_'
 
 /** A link in the document: where it is, and the address it opens, scheme and all. */
-private class WebLink(val range: TextRange, val url: String)
+private class TextLink(val range: TextRange, val url: String) {
+    /** What the menu calls it. */
+    val kind get() = if (url.startsWith("mailto:")) "email" else "link"
+}
 
 /**
- * The web address [offset] is in or next to, and what it opens, found the way a text field finds
- * the links it makes tappable. A bare address is given the scheme it would open with.
+ * The web or email address [offset] is in or next to, and what it opens, found the way a text field
+ * finds the links it makes tappable. A bare address is given the scheme it would open with.
  */
 private fun linkAt(text: CharSequence, offset: Int): Pair<TextRange, String>? {
     val spans = SpannableString(text)
-    if (!Linkify.addLinks(spans, Linkify.WEB_URLS)) return null
+    if (!Linkify.addLinks(spans, Linkify.WEB_URLS or Linkify.EMAIL_ADDRESSES)) return null
     val span = spans.getSpans(offset, offset, URLSpan::class.java).firstOrNull() ?: return null
     return TextRange(spans.getSpanStart(span), spans.getSpanEnd(span)) to span.url
 }
