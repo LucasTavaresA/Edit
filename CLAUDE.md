@@ -18,6 +18,8 @@ Written as one long line per paragraph or list item, never hard wrapped. The edi
 
 PROGRESS says what things are supposed to be and what is left to do, as concepts another instance cannot re-derive by reading the code: what a constraint is, what it costs, what it rules out. No implementations: the code can be worked out, usually better than a note written before the problem was in front of it, and a stale prescription is worse than none. Nothing about what was tried, tested or dropped.
 
+A decision earns a place only if it is spread across the code rather than sitting in one place, or if it is unintuitive but intentional, the kind another instance would otherwise "fix". Anything a reader finds by opening the one file it lives in stays out, and so does the mechanism behind a decision: keep the why and what it rules out, in as few sentences as carry it.
+
 ## Building
 
 - **A build is two JVMs with a 2 GB heap ceiling each.** The Gradle daemon runs `-Xmx2048m` and the Kotlin daemon another, and the Kotlin one lingers for two hours after it is done compiling. Kotlin daemons also pile up: `Detected multiple Kotlin daemon sessions` means more than one is alive, each with its own ceiling. When memory is tight, `-Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs=-Xmx1536m` builds in one JVM instead of two.
