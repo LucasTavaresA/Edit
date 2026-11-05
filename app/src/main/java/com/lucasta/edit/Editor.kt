@@ -290,6 +290,10 @@ class DocumentState(spill: File?) : Closeable {
     var canRedo by mutableStateOf(false)
         private set
 
+    /** Whether the document differs from what its file was last in step with. */
+    var unsaved by mutableStateOf(false)
+        private set
+
     /** What the window was given, which is what an edit to it is measured against. */
     private var windowSlice = Slice("", 0, Encoding.Utf8, intArrayOf(0, 0))
 
@@ -414,7 +418,10 @@ class DocumentState(spill: File?) : Closeable {
         val content = content
         val take = content.take()
         return try {
-            write(take).onSuccess { if (it == Collision.None) content.saved(take) }
+            write(take).onSuccess {
+                if (it == Collision.None) content.saved(take)
+                if (content === this.content) track()
+            }
         } finally {
             take.close()
         }
@@ -1221,6 +1228,7 @@ class DocumentState(spill: File?) : Closeable {
     private fun track() {
         canUndo = content.canUndo
         canRedo = content.canRedo
+        unsaved = content.unsaved
     }
 
     /**

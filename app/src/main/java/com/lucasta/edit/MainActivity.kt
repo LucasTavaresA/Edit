@@ -1,6 +1,5 @@
 package com.lucasta.edit
 
-import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -8,11 +7,17 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.addCallback
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -23,6 +28,9 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.ime
@@ -30,6 +38,8 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.HorizontalDivider
@@ -44,7 +54,6 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -56,21 +65,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
 import android.graphics.Color as ArgbColor
 
@@ -80,22 +96,35 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val bars = SystemBarStyle.auto(ArgbColor.TRANSPARENT, ArgbColor.TRANSPARENT)
         enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
-        // A rebuilt activity is handed the intent it was first started with, which no longer says
-        // what is open. The file kept for the next start does, and handed nothing, that is opened.
-        val opened = when (intent?.action) {
-            Intent.ACTION_VIEW, Intent.ACTION_EDIT -> intent.data
-            else -> null
-        }.takeIf { savedInstanceState == null }
+        val files = Files.of(this)
+        // A rebuilt activity is handed the intent it was first started with, which says nothing
+        // about what is open by now.
+        files.arrive(handedBy(intent).takeIf { savedInstanceState == null })
+        // Closing Edit would throw every unsaved edit away, in every file, so Back only puts it in
+        // the background.
+        onBackPressedDispatcher.addCallback(this) { moveTaskToBack(true) }
         setContent {
             // The bar icons are set once, against the mode in force at the time, and the activity
             // is no longer rebuilt when that mode changes — so they are set again when it does.
             val dark = isSystemInDarkTheme()
             LaunchedEffect(dark) { enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars) }
             MaterialTheme(colorScheme = systemColorScheme(dark)) {
-                Surface(Modifier.fillMaxSize()) { Editor(opened) }
+                Surface(Modifier.fillMaxSize()) { Editor(files) }
             }
         }
     }
+
+    /** Edit is a single instance, so another app handing a file over reaches the running one here. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Files.of(this).arrive(handedBy(intent))
+    }
+}
+
+/** The file [intent] hands over to be opened, if it is one that does. */
+private fun handedBy(intent: Intent?): Uri? = when (intent?.action) {
+    Intent.ACTION_VIEW, Intent.ACTION_EDIT -> intent.data
+    else -> null
 }
 
 @Composable
@@ -164,271 +193,65 @@ private fun ColorScheme.unlit(): ColorScheme = copy(
     outlineVariant = Color.White,
 )
 
-/** What a document that has never been saved is called, and what Save as offers for it. */
-private const val UNTITLED = "untitled.txt"
-
-/**
- * What the bar says while the document has no file behind it: at start, and after New. Save stays
- * off until Save as has said where it goes.
- */
-private const val NO_FILE = "no file"
-
-/**
- * How long something said keeps the bar that names the file on screen while the keyboard is up,
- * where it otherwise goes with the row above it to give the text the room.
- */
-private enum class Hold {
-    /** Not at all: a file opening or saving while it runs, and New. They wait for the keyboard to go. */
-    Never,
-
-    /** [HOLD_TIME] and no longer: a file just opened or just saved, long enough to catch which. */
-    Briefly,
-
-    /**
-     * Until [HOLD_TIME] after the user next presses anywhere on the screen or changes the text,
-     * which is what a warning gets. Waiting for the user rather than for a clock is what stops a
-     * warning coming and going while nobody was looking, and the time after is what stops the touch
-     * that noticed it from taking it away before it is read.
-     */
-    UntilSeen,
-}
-
 /** How long [Hold.Briefly] holds, and how long [Hold.UntilSeen] goes on holding once the user is back. */
 private val HOLD_TIME = 2.seconds
-
-/**
- * What the bar that names the file is saying, and whether it is still holding the bar over the
- * keyboard to say it. A new one for every message, the same message again included, so that each
- * holds for its own time and ending one hold can never end the next.
- */
-private class Notice(val text: String, val hold: Hold) {
-    var holding by mutableStateOf(hold != Hold.Never)
-}
-
-/**
- * Opening a file, New and saving take turns: one at a time, in the order they were asked for, and
- * nothing is refused meanwhile. Two saves at once would each find the other's write in the file and
- * ask about it as somebody else's, and a save ends by moving the base and naming the file it wrote,
- * which an open or New in between would already have replaced.
- *
- * The turns are the process's rather than one screen's, since another app handing a file over can
- * start a second copy of Edit beside the first.
- */
-private val turns = Mutex()
-
-/**
- * Where the file kept for the next start is written down. Only its link and its name are, so what
- * comes back is the file as it stands by then, and edits not saved before Edit stopped are not
- * part of it.
- */
-private const val LAST = "last"
 
 /** Where how the text looks is written down: the size a pinch left it at, for every file alike. */
 private const val LOOKS = "looks"
 
-/**
- * The file that was open when Edit last stopped, and what it was called. The name is kept because
- * it cannot be asked for once the file's access has gone, which is exactly when it needs saying.
- */
-private class LastFile(val uri: Uri, val name: String)
-
-/** The file that was open when Edit last stopped, or null if none was or it could not be kept. */
-private fun lastFile(context: Context): LastFile? {
-    val last = context.getSharedPreferences(LAST, Context.MODE_PRIVATE)
-    val uri = last.getString("file", null) ?: return null
-    return LastFile(Uri.parse(uri), last.getString("name", null) ?: uri)
-}
-
-/**
- * Keeps [uri], called [name], as the file the next start opens, or nothing when there is no file or
- * its access cannot outlive the process. Open and Save as hand over access that can be kept;
- * another app handing a file over usually does not, and then the next start opens nothing rather
- * than a file older than the last one. The only grant held is the kept file's, so the one before
- * is let go.
- */
-private fun keepLastFile(context: Context, uri: Uri?, name: String) {
-    val resolver = context.contentResolver
-    val kept = uri?.takeIf { resolver.keepAccess(it) }
-    for (held in resolver.persistedUriPermissions) {
-        if (held.uri == kept) continue
-        val read = if (held.isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0
-        val write = if (held.isWritePermission) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0
-        // One that will not let go is only one more grant held, and never worth stopping for.
-        runCatching { resolver.releasePersistableUriPermission(held.uri, read or write) }
-    }
-    context.getSharedPreferences(LAST, Context.MODE_PRIVATE).edit()
-        .putString("file", kept?.toString())
-        .putString("name", kept?.let { name })
-        .apply()
-}
-
-/**
- * Whether the access kept to [uri] is still held. A provider lets go of it once the file is
- * deleted, and after that the file cannot be opened or even named.
- */
-private fun ContentResolver.holdsAccess(uri: Uri): Boolean = persistedUriPermissions.any { it.uri == uri }
-
-/**
- * Keeps access to [uri] past the process, writing included where that was given, and says whether
- * it could. Asking for more than was given is refused outright, hence reading alone after.
- */
-private fun ContentResolver.keepAccess(uri: Uri): Boolean {
-    val read = Intent.FLAG_GRANT_READ_URI_PERMISSION
-    val write = Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-    return listOf(read or write, read).any { runCatching { takePersistableUriPermission(uri, it) }.isSuccess }
-}
-
 @Composable
-private fun Editor(opened: Uri? = null) {
+private fun Editor(files: Files) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val document = remember { DocumentState(context.cacheDir) }
-    var file by remember { mutableStateOf<Uri?>(null) }
-    var name by remember { mutableStateOf(UNTITLED) }
-    var notice by remember { mutableStateOf(Notice(NO_FILE, Hold.Never)) }
+    val current = files.current
+    val document = checkNotNull(current.document) { "the file on screen is always opened" }
+    val notice = files.bar
     var touches by remember { mutableIntStateOf(0) }
-    var asking by remember { mutableStateOf(false) }
     val looks = remember { context.getSharedPreferences(LOOKS, Context.MODE_PRIVATE) }
     var scale by remember { mutableFloatStateOf(looks.getFloat("scale", 1f)) }
 
-    /**
-     * Whether a save is waiting for its turn. Pressing Save again joins it rather than queueing
-     * another behind it: a save writes the document as it stands when its turn comes, so the one
-     * waiting already takes in everything done up to then.
-     */
-    var saveWaiting by remember { mutableStateOf(false) }
+    /** Whether the list of files is up, over the bar that opened it. */
+    var listing by remember { mutableStateOf(false) }
 
-    // The document holds its copy of the file open for as long as it is the open document, so this
-    // is where it lets go. A save still writing from it holds it too, and whichever of the two lets
-    // go last closes it.
-    DisposableEffect(document) { onDispose { document.close() } }
+    /** Where the bar that names the file stands, which is where the list comes up. */
+    var barAt by remember { mutableStateOf(Rect.Zero) }
 
-    /** Puts [message] in the bar that names the file, held over the keyboard as [hold] says. */
-    fun say(message: String, hold: Hold = Hold.Never) {
-        notice = Notice(message, hold)
-    }
+    /** The file Save as was asked for, which is not always the one on screen by the time it answers. */
+    var savingAs by remember { mutableStateOf<OpenFile?>(null) }
 
     LaunchedEffect(notice) {
-        val said = notice
-        if (!said.holding) return@LaunchedEffect
-        if (said.hold == Hold.UntilSeen) {
-            // The next press anywhere on the screen, or the next thing the keyboard does to the
-            // text — which reaches the field without passing through the screen's touches at all.
-            snapshotFlow { Triple(touches, document.window.text, document.window.selection) }
-                .drop(1)
-                .first()
-        }
-        delay(HOLD_TIME)
-        said.holding = false
-    }
-
-    /** Runs [task] once every file operation asked for before it has finished. */
-    fun inTurn(task: suspend () -> Unit) {
-        scope.launch { turns.withLock { task() } }
-    }
-
-    suspend fun load(uri: Uri) {
-        heap("before")
-        // Opening copies the file and indexes it for chunk boundaries, two passes over the whole
-        // thing: seconds for a file of a gigabyte. Say so rather than look like nothing happened.
-        say("opening ${displayName(context, uri)}")
-        timed("open") {
-            openDocument(context, uri)
-                .onSuccess {
-                    timed("setText") { document.load(it, whole = it.format == Format.Encrypted) }
-                    frameAfterNext("layout")
-                    heap("after")
-                    file = uri
-                    name = displayName(context, uri)
-                    say(name, Hold.Briefly)
+        if (notice.holding) {
+            if (notice.hold == Hold.UntilSeen) {
+                // The next press anywhere on the screen, or the next thing the keyboard does to the
+                // text — which reaches the field without passing through the screen's touches at
+                // all.
+                snapshotFlow {
+                    val window = files.current.document?.window
+                    Triple(touches, window?.text, window?.selection)
                 }
-                .onFailure { say("could not open: ${it.message}", Hold.UntilSeen) }
-        }
-    }
-
-    /**
-     * Writes the document into [target]. Unless [anyway], only while the file still holds what
-     * the document was last in step with — see [saveDocument].
-     */
-    suspend fun write(target: Uri, anyway: Boolean) {
-        say("saving ${displayName(context, target)}")
-        document.save { saveDocument(context, target, it, anyway) }
-            .onSuccess { found ->
-                when (found) {
-                    Collision.None -> {
-                        file = target
-                        name = displayName(context, target)
-                        say("saved $name", Hold.Briefly)
-                    }
-                    // Something else wrote the file, found before anything was written or arriving
-                    // while it was. The document is still what was to be saved, so the question is
-                    // whose version the file keeps — and after Save as, the file in question is the
-                    // one it was saved as.
-                    Collision.Changed -> {
-                        file = target
-                        name = displayName(context, target)
-                        say(name)
-                        asking = true
-                    }
-                }
+                    .drop(1)
+                    .first()
             }
-            .onFailure { say("could not save: ${it.message}", Hold.UntilSeen) }
-    }
-
-    /**
-     * Back to an empty document with no file behind it. Nothing is created on disk: a new file is
-     * one that has never been saved, and where it goes is asked for by Save as when there is
-     * something to put in it.
-     */
-    fun new() {
-        inTurn {
-            document.load(Content.empty(context.cacheDir))
-            document.focus(0)
-            file = null
-            name = UNTITLED
-            say(NO_FILE)
+            delay(HOLD_TIME)
         }
-    }
-
-    // A file handed over is opened, and otherwise the one open when Edit last stopped. Once that has
-    // had its turn, the file kept follows whichever is open, so one that could not be opened again
-    // is forgotten rather than tried at every start, and New leaves nothing to come back to.
-    LaunchedEffect(opened) {
-        turns.withLock {
-            val last = if (opened == null) lastFile(context) else null
-            when {
-                opened != null -> load(opened)
-                last == null -> {}
-                !context.contentResolver.holdsAccess(last.uri) ->
-                    say("could not open ${last.name}: it is gone", Hold.UntilSeen)
-                else -> load(last.uri)
-            }
-        }
-        snapshotFlow { file to name }.collect { (uri, called) -> keepLastFile(context, uri, called) }
+        files.settled(notice)
     }
 
     val open = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
         picked ?: return@rememberLauncherForActivityResult
-        inTurn { load(picked) }
+        files.open(picked)
     }
 
     val saveAs = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { created ->
-        created ?: return@rememberLauncherForActivityResult
-        inTurn { write(created, anyway = true) }
+        val file = savingAs
+        savingAs = null
+        if (created != null && file != null) files.saveAs(file, created)
     }
 
-    /**
-     * Which file, and what goes into it, are both taken when the save's turn comes rather than when
-     * Save was pressed: a file opened in between is the document by then, and writing it into the
-     * file it replaced would be worse than saving nothing.
-     */
-    fun save() {
-        if (saveWaiting) return
-        saveWaiting = true
-        inTurn {
-            saveWaiting = false
-            file?.let { write(it, anyway = false) }
-        }
+    /** Asks where [file] is to be saved as, and saves it there once that is answered. */
+    fun pickTarget(file: OpenFile) {
+        savingAs = file
+        saveAs.launch(file.name)
     }
 
     val safe = WindowInsets.safeDrawing
@@ -463,9 +286,9 @@ private fun Editor(opened: Uri? = null) {
         if (!typing) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 Row(Modifier.fillMaxWidth().height(minOf(maxWidth, maxHeight) / ROW_SHARE)) {
-                    Tool("New") { new() }
+                    Tool("New") { files.new() }
                     Tool("Open") { open.launch(arrayOf("*/*")) }
-                    Tool("Save as") { saveAs.launch(name) }
+                    Tool("Save as") { pickTarget(current) }
                 }
             }
         }
@@ -473,8 +296,16 @@ private fun Editor(opened: Uri? = null) {
         // text down rather than cover it, so the cursor can never be under them.
         if (!typing || notice.holding) {
             // A pixel above and below and nothing else: it is something to read rather than a
-            // control, so it is as tall as its sentence and aligned with the text below.
-            Text(notice.text, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = pixel))
+            // control, so it is as tall as its sentence and aligned with the text below. Tapping
+            // it brings the list of files up over it.
+            Text(
+                notice.text,
+                Modifier
+                    .fillMaxWidth()
+                    .onGloballyPositioned { barAt = it.boundsInRoot() }
+                    .clickable { listing = true }
+                    .padding(horizontal = 12.dp, vertical = pixel),
+            )
             // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at
             // that width the rule reads as a bar across the screen rather than as a line under the
             // toolbar.
@@ -484,7 +315,7 @@ private fun Editor(opened: Uri? = null) {
             state = document,
             modifier = Modifier.fillMaxWidth().weight(1f),
             margin = 12.dp,
-            refuse = { say(it, Hold.UntilSeen) },
+            refuse = { files.say(current, it, Hold.UntilSeen) },
             scale = scale,
             rescale = {
                 scale = it
@@ -503,7 +334,7 @@ private fun Editor(opened: Uri? = null) {
                 Modifier.fillMaxWidth().windowInsetsPadding(safe.only(WindowInsetsSides.Bottom)),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Op("Save", enabled = file != null) { save() }
+                Op("Save", enabled = current.uri != null) { files.save(current) }
                 Op("All") { document.selectAll() }
                 Op("Undo", enabled = document.canUndo) { scope.launch { document.undo() } }
                 Op("Redo", enabled = document.canRedo) { scope.launch { document.redo() } }
@@ -511,10 +342,17 @@ private fun Editor(opened: Uri? = null) {
         }
     }
 
-    if (asking) {
+    // Over everything, the bar it came from included: Editor is laid out in the box a Surface puts
+    // its content in, so what comes after the column stacks on it.
+    if (listing) FileList(files, barAt, pixel) { listing = false }
+
+    // The file asked about may be any in the list, not only the one on screen, so the question
+    // names it and its answers go to it.
+    val asking = files.list.firstOrNull { it.asking }
+    if (asking != null) {
         AlertDialog(
-            onDismissRequest = { asking = false },
-            title = { Text("$name changed") },
+            onDismissRequest = { asking.asking = false },
+            title = { Text("${asking.name} changed") },
             text = {
                 Text(
                     "Something else changed it since it was opened or last saved. This document is " +
@@ -524,20 +362,67 @@ private fun Editor(opened: Uri? = null) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    asking = false
-                    inTurn { file?.let { write(it, anyway = true) } }
+                    asking.asking = false
+                    files.overwrite(asking)
                 }) { Text("Overwrite") }
             },
             dismissButton = {
                 Row {
                     TextButton(onClick = {
-                        asking = false
-                        saveAs.launch(name)
+                        asking.asking = false
+                        pickTarget(asking)
                     }) { Text("Save as") }
-                    TextButton(onClick = { asking = false }) { Text("Cancel") }
+                    TextButton(onClick = { asking.asking = false }) { Text("Cancel") }
                 }
             },
         )
+    }
+}
+
+/**
+ * The list of open files, brought up by tapping the bar that names the one on screen, which is the
+ * first row and stands exactly where [bar], the bar's text, did, so the name does not move. The
+ * rest follow below it in the list's order, an unsaved one marked. Going to a file, a tap anywhere
+ * off the list, or Back puts it away through [close]. As plain as it can be for now.
+ */
+@Composable
+private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
+    BackHandler(onBack = close)
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    val density = LocalDensity.current
+    BoxWithConstraints(
+        Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { origin = it.positionInRoot() }
+            .pointerInput(Unit) { detectTapGestures { close() } }
+    ) {
+        val top = bar.top - origin.y
+        Column(
+            Modifier
+                .offset { IntOffset((bar.left - origin.x).roundToInt(), top.roundToInt()) }
+                .width(with(density) { bar.width.toDp() })
+                .heightIn(max = maxHeight - with(density) { top.toDp() })
+                .background(MaterialTheme.colorScheme.surface)
+                .border(pixel, MaterialTheme.colorScheme.outlineVariant)
+                .verticalScroll(rememberScrollState())
+        ) {
+            files.list.forEachIndexed { at, file ->
+                Text(
+                    if (file.document?.unsaved == true) "${file.name} *" else file.name,
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            close()
+                            files.goTo(file)
+                        }
+                        // The first row the bar's own size, so its name sits where the bar's did,
+                        // and the rest a target a thumb can find.
+                        .padding(horizontal = 12.dp, vertical = if (at == 0) pixel else 10.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 

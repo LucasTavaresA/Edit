@@ -21,10 +21,15 @@
             the top of the screen. Resize makes the IME an inset the layout pays in the one place
             that should pay it.
         -->
+        <!--
+            One Edit, holding every open file: another app handing a file over reaches the running
+            one through onNewIntent and joins its list, rather than starting a copy in its own task.
+        -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
