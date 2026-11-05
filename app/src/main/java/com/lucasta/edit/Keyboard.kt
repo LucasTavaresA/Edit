@@ -27,6 +27,7 @@ import androidx.compose.ui.text.TextRange
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -69,28 +70,65 @@ internal class KeyboardNode(private var state: DocumentState, private var clip: 
 
     private var session: Job? = null
 
+    /** Waiting, after going to another document, for the user to put the cursor somewhere. */
+    private var waiting: Job? = null
+
+    /**
+     * Another document, or another clipboard, under the same editor. Focus stays where it was, so
+     * the document coming in takes it over from the one going.
+     *
+     * Going to another document puts the keyboard away, whether or not it has a cursor: one left up
+     * over a document with no cursor would drop what is typed into it, and keeping it up only for
+     * some would read as random. Compose shows the keyboard whenever a session starts and puts it
+     * away when one ends with none after it, so the session ends here and the next one starts only
+     * once the user puts the cursor somewhere, as after opening a file. What the keyboard was told
+     * about the last document, its word included, is nothing to this one either way.
+     */
     fun update(state: DocumentState, clip: Clip) {
         if (state === this.state && clip === this.clip) return
+        val left = this.state
         this.state = state
         this.clip = clip
-        if (session != null) {
+        if (state !== left) {
+            state.focused = left.focused
+            left.focused = false
+            left.composition = null
+            waiting?.cancel()
+            waiting = null
+            if (session != null) {
+                session?.cancel()
+                session = null
+                val was = state.opened
+                waiting = coroutineScope.launch {
+                    snapshotFlow { state.opened }.first { it != was }
+                    if (session == null && state.focused) start()
+                }
+            }
+        } else if (session != null) {
             session?.cancel()
             start()
         }
     }
 
     override fun onFocusEvent(focusState: FocusState) {
+        // Only focus arriving, not focus the editor already held: going to another document hands
+        // the focus over in [update], and Compose reports focus again after an update, which must
+        // neither start the session [update] ended nor place a cursor in a document that was left
+        // without one.
+        val arrived = focusState.isFocused && !state.focused
         state.focused = focusState.isFocused
         if (focusState.isFocused) {
-            if (session == null) start()
+            if (arrived && session == null) start()
             // Focus that came without a place to type, as moving focus with a hardware keyboard's
             // arrows brings it, puts the cursor at the top of the screen, as a text field puts one
             // somewhere when focus reaches it: otherwise the keyboard is up and typing goes nowhere.
             val state = state
-            if (state.windowStart < 0 && state.marked == null) coroutineScope.launch { state.focus(state.visibleFrom) }
+            if (arrived && state.windowStart < 0 && state.marked == null) coroutineScope.launch { state.focus(state.visibleFrom) }
         } else {
             session?.cancel()
             session = null
+            waiting?.cancel()
+            waiting = null
         }
     }
 

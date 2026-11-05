@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberOverscrollEffect
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
@@ -26,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,6 +73,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -334,7 +335,17 @@ class DocumentState(spill: File?) : Closeable {
      */
     private var whole = false
 
-    /** The list the rows are drawn in, so the window can make room for itself before it moves. */
+    /**
+     * Where the list of rows stands in this document. The document's rather than the screen's, so
+     * that a document put back on screen is where it was left, and nothing of another's place
+     * carries over to it.
+     */
+    val place = LazyListState()
+
+    /**
+     * [place] while the document is on screen, and null otherwise, so the window can make room for
+     * itself before it moves. A list that is not being drawn has no layout to read or scroll by.
+     */
     private var list: LazyListState? = null
 
     /**
@@ -346,8 +357,8 @@ class DocumentState(spill: File?) : Closeable {
     /** The window's last text layout, which is the only thing that knows where the cursor is drawn. */
     private var layout: TextLayoutResult? = null
 
-    fun drawnIn(list: LazyListState?, inset: Float = 0f) {
-        this.list = list
+    fun drawnIn(shown: Boolean, inset: Float = 0f) {
+        this.list = if (shown) place else null
         this.inset = inset
     }
 
@@ -384,6 +395,7 @@ class DocumentState(spill: File?) : Closeable {
         visibleTo = 0
         content = value
         index = indexed
+        place.requestScrollToItem(0)
         generation++
         changed()
     }
@@ -1556,10 +1568,10 @@ fun DocumentEditor(
     scale: Float = 1f,
     rescale: (Float) -> Unit = {},
 ) {
-    val rows = remember(state.version, state.chunks, state.windowStart, state.windowEnd) {
+    val rows = remember(state, state.version, state.chunks, state.windowStart, state.windowEnd) {
         Rows(state.chunks, state.length, state.windowStart, state.windowEnd)
     }
-    val list = rememberLazyListState()
+    val list = state.place
     val overscroll = rememberOverscrollEffect()
     val clip = rememberClip(state, refuse)
     val focus = remember { FocusRequester() }
@@ -1607,14 +1619,17 @@ fun DocumentEditor(
     }
     // The user putting the cursor somewhere brings the keyboard up. Taking focus does that on its
     // own, but the editor usually holds it already, and the keyboard may have been put away since.
-    LaunchedEffect(state, state.opened) {
-        if (state.opened == 0) return@LaunchedEffect
-        runCatching { focus.requestFocus() }
-        view.context.getSystemService(InputMethodManager::class.java).showSoftInput(view, 0)
+    // Only a place put after the document came on screen: one it was given before is not the user
+    // asking for the keyboard now.
+    LaunchedEffect(state) {
+        snapshotFlow { state.opened }.drop(1).collect {
+            runCatching { focus.requestFocus() }
+            view.context.getSystemService(InputMethodManager::class.java).showSoftInput(view, 0)
+        }
     }
-    DisposableEffect(state, list, inset) {
-        state.drawnIn(list, inset)
-        onDispose { state.drawnIn(null) }
+    DisposableEffect(state, inset) {
+        state.drawnIn(true, inset)
+        onDispose { state.drawnIn(false) }
     }
     // The screen under the text getting shorter — the keyboard coming up over a cursor put low on
     // the screen, a turn to landscape — must not leave the cursor under it.
@@ -1625,7 +1640,6 @@ fun DocumentEditor(
             was = now
         }
     }
-    LaunchedEffect(state.generation) { list.scrollToItem(0) }
     LaunchedEffect(list, state) {
         snapshotFlow { list.layoutInfo.visibleItemsInfo }
             .collect { visible ->
@@ -1648,6 +1662,10 @@ fun DocumentEditor(
     //
     // Focus, keys and the keyboard are the editor's as a whole and no row's, so that nothing a row
     // does, the window being cut included, reaches any of them.
+    //
+    // Everything inside is the document's and starts over with another one. Rows are keyed on
+    // where they start, and two documents both have a row at 0, so a row kept across would go on
+    // drawing the other document's text; the same goes for whatever the touches remember.
     Box(
         modifier
             .then(KeyboardElement(state, clip))
@@ -1655,26 +1673,28 @@ fun DocumentEditor(
             .onKeyEvent { event -> keys(event, state, clip, scope) }
             .focusTarget(),
     ) {
-        CompositionLocalProvider(LocalTextStyle provides style) {
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                state = list,
-                contentPadding = PaddingValues(horizontal = margin),
-                userScrollEnabled = false,
-                overscrollEffect = overscroll,
-            ) {
-                items(rows.count, key = { rows.start(it) }) { index ->
-                    if (rows.editable(index)) WindowRow(state)
-                    else ChunkRow(state, rows.start(index), rows.end(index))
-                }
-                // Room to scroll the last line clear of the bottom edge. A touch on it is a touch
-                // below the last row, which is the end of the document.
-                item(key = "tail") {
-                    Spacer(Modifier.fillMaxWidth().height(TAIL))
+        key(state) {
+            CompositionLocalProvider(LocalTextStyle provides style) {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    state = list,
+                    contentPadding = PaddingValues(horizontal = margin),
+                    userScrollEnabled = false,
+                    overscrollEffect = overscroll,
+                ) {
+                    items(rows.count, key = { rows.start(it) }) { index ->
+                        if (rows.editable(index)) WindowRow(state)
+                        else ChunkRow(state, rows.start(index), rows.end(index))
+                    }
+                    // Room to scroll the last line clear of the bottom edge. A touch on it is a
+                    // touch below the last row, which is the end of the document.
+                    item(key = "tail") {
+                        Spacer(Modifier.fillMaxWidth().height(TAIL))
+                    }
                 }
             }
+            SelectionLayer(state, list, overscroll, clip, pinch, refuse, Modifier.matchParentSize())
         }
-        SelectionLayer(state, list, overscroll, clip, pinch, refuse, Modifier.matchParentSize())
     }
 }
 
