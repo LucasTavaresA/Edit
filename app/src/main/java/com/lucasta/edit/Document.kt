@@ -165,7 +165,8 @@ private const val STORAGE = "com.android.externalstorage.documents"
 
 /**
  * Where [uri] lives: the folder, when the document id is a path or MediaStore says, and the app
- * that provides it, unless that is the phone's own storage or MediaStore, whose folders say it all.
+ * that provides it, unless that is the phone's own storage, MediaStore, or Downloads with a path on
+ * the phone's storage, whose folders say it all.
  * It is what tells two files of the same name apart in the list.
  */
 fun whereIs(context: Context, uri: Uri): String {
@@ -177,15 +178,17 @@ fun whereIs(context: Context, uri: Uri): String {
         authority == STORAGE -> {
             val volume = id.substringBefore(':')
             val path = id.substringAfter(':', "").substringBeforeLast('/', "")
-            when {
-                volume != "primary" -> "$volume/$path".trimEnd('/')
-                path.isEmpty() -> "internal storage"
-                else -> path
-            }
+            storageFolder(volume.takeIf { it != "primary" }, path)
         }
         // Downloads hands out ids like `raw:/storage/emulated/0/Download/a.txt`, and providers
         // backed by a plain directory, Termux's among them, the absolute path itself.
-        id.removePrefix("raw:").startsWith('/') -> id.removePrefix("raw:").substringBeforeLast('/').ifEmpty { "/" }
+        id.removePrefix("raw:").startsWith('/') -> {
+            val path = id.removePrefix("raw:").substringBeforeLast('/').ifEmpty { "/" }
+            // Downloads is the system's own, so a path on the phone's storage says it all, as one
+            // from the storage provider does, and is told the same way.
+            if (authority in MAPPED) onStorage(path)?.let { return it }
+            path
+        }
         else -> null
     }
     val app = if (authority == STORAGE) null else runCatching {
@@ -193,6 +196,30 @@ fun whereIs(context: Context, uri: Uri): String {
         packages.resolveContentProvider(authority, 0)?.loadLabel(packages)?.toString()
     }.getOrNull() ?: authority
     return listOfNotNull(app, folder).joinToString(" · ")
+}
+
+/**
+ * A folder on the phone's storage as the storage provider names it: [path] on the phone's own
+ * storage when [volume] is null, otherwise on that volume, a card say.
+ */
+private fun storageFolder(volume: String?, path: String): String = when {
+    volume != null -> "$volume/$path".trimEnd('/')
+    path.isEmpty() -> "internal storage"
+    else -> path
+}
+
+/**
+ * The folder at the absolute [path] as [storageFolder] tells it, if it is on the phone's storage:
+ * `/storage/emulated/<user>` for its own, `/storage/<volume>` for any other.
+ */
+private fun onStorage(path: String): String? {
+    val parts = path.removePrefix("/storage/").takeIf { it != path }?.split('/') ?: return null
+    return when {
+        parts[0] == "emulated" && parts.size >= 2 -> storageFolder(null, parts.drop(2).joinToString("/"))
+        parts[0].isNotEmpty() && parts[0] != "emulated" && parts[0] != "self" ->
+            storageFolder(parts[0], parts.drop(1).joinToString("/"))
+        else -> null
+    }
 }
 
 /**
