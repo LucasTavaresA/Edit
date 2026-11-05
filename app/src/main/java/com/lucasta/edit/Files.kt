@@ -93,6 +93,9 @@ class OpenFile(uri: Uri?, name: String, document: DocumentState? = null, said: S
     /** Whether closing it with edits not saved is waiting on the user: save, close or nevermind. */
     var closing by mutableStateOf(false)
 
+    /** Whether that closing is for taking it out of the list, which it leaves once closed. */
+    var forgetting by mutableStateOf(false)
+
     /**
      * Whether its access outlasts the process, so that unopened it can still be written down for
      * the next start. Not so for one another app handed over for the process alone, which closed
@@ -227,7 +230,23 @@ class Files private constructor(private val context: Context) {
      * not saved asks first, through [OpenFile.closing]; one without closes straight away.
      */
     fun close(file: OpenFile) {
+        file.forgetting = false
         if (file.document?.unsaved == true) file.closing = true else discard(file)
+    }
+
+    /**
+     * Takes [file] out of the list, the file itself untouched; its access is let go with it. One
+     * opened is closed first, asking as [close] does if it has edits not saved.
+     */
+    fun forget(file: OpenFile) {
+        file.forgetting = true
+        if (file.document?.unsaved == true) file.closing = true else discard(file)
+    }
+
+    /** The answer Nevermind: [file] stays as it is, opened and in the list. */
+    fun keepOpen(file: OpenFile) {
+        file.closing = false
+        file.forgetting = false
     }
 
     /** Closes [file] whatever it holds, the answer Close. */
@@ -275,9 +294,15 @@ class Files private constructor(private val context: Context) {
      * was, so the list stays the files most recently gone to. A new one has nothing to come back
      * as and leaves the list. The file on screen gives way to the next in the list that opens, and
      * to a new one if none does. Run in turn, so no save of it is running and none waits behind.
+     * One being forgotten leaves the list too, opened or not.
      */
     private suspend fun unload(file: OpenFile) {
-        if (file !in list || file.document == null) return
+        if (file !in list) return
+        if (file.document == null) {
+            if (file.forgetting) list.remove(file)
+            if (bar.about === file) bar = current.notice
+            return
+        }
         if (file === current) {
             for (next in list.drop(1)) {
                 if (current !== file) break
@@ -285,7 +310,7 @@ class Files private constructor(private val context: Context) {
             }
             if (current === file) top(untitled())
         }
-        if (file.uri == null) list.remove(file)
+        if (file.uri == null || file.forgetting) list.remove(file)
         if (bar.about === file) bar = current.notice
         val document = file.document ?: return
         file.document = null
@@ -320,7 +345,7 @@ class Files private constructor(private val context: Context) {
 
     /**
      * Goes to [file], opening it as it stands now if it has not been. A file that is gone leaves the
-     * list, the one way a file with a link ever does besides [trim]; one that fails to open for
+     * list, the one way a file with a link ever does besides [trim] and [forget]; one that fails to open for
      * any other reason stays, unopened, and the screen stays where it was.
      */
     private suspend fun reach(file: OpenFile) {

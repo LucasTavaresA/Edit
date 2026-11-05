@@ -14,10 +14,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -47,6 +49,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
@@ -405,10 +409,11 @@ private fun Editor(files: Files) {
     // close more from.
     val closing = files.list.firstOrNull { it.closing }
     if (closing != null) {
+        val doing = if (closing.forgetting) "removing it from the list" else "closing it"
         AlertDialog(
-            onDismissRequest = { closing.closing = false },
-            title = { Text("Do you want to save ${closing.name} before closing it?") },
-            text = { Text("It has edits that are not saved. Closing without saving throws them away.") },
+            onDismissRequest = { files.keepOpen(closing) },
+            title = { Text("Do you want to save ${closing.name} before $doing?") },
+            text = { Text("It has edits that are not saved. ${if (closing.forgetting) "Removing" else "Closing"} without saving throws them away.") },
             confirmButton = {
                 TextButton(onClick = {
                     closing.closing = false
@@ -421,8 +426,8 @@ private fun Editor(files: Files) {
                     TextButton(onClick = {
                         closing.closing = false
                         files.discard(closing)
-                    }) { Text("Close") }
-                    TextButton(onClick = { closing.closing = false }) { Text("Nevermind") }
+                    }) { Text(if (closing.forgetting) "Remove" else "Close") }
+                    TextButton(onClick = { files.keepOpen(closing) }) { Text("Nevermind") }
                 }
             },
         )
@@ -436,8 +441,8 @@ private fun Editor(files: Files) {
  * name, which is what tells two of the same name apart, and an unsaved one has the bar's mark right
  * after its name. Each opened one but the first ends in a button that
  * closes its file and leaves the list up; one not opened has nothing to close, and the one on
- * screen is not closed from here, so neither has a button. Going to a file, a tap anywhere off the
- * list, or Back puts it away through [close].
+ * screen is not closed from here, so neither has a button. Holding any row offers to remove it from
+ * the list. Going to a file, a tap anywhere off the list, or Back puts it away through [close].
  */
 @Composable
 private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
@@ -471,12 +476,16 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                     // rather than as the place under it.
                     val unopened = lerp(quiet, MaterialTheme.colorScheme.onSurface, 0.25f)
                     val closable = at > 0 && file.document != null
+                    var holding by remember { mutableStateOf(false) }
                     // As tall as the name and place, so the close button can take the row's height.
                     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
                         Column(
                             Modifier
                                 .weight(1f)
-                                .clickable {
+                                .combinedClickable(
+                                    onLongClick = { holding = true },
+                                    onLongClickLabel = "Remove from list",
+                                ) {
                                     close()
                                     files.goTo(file)
                                 }
@@ -508,6 +517,22 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                                 // A path says the most at its end, the folder the file is in.
                                 overflow = TextOverflow.StartEllipsis,
                             )
+                            // Under the row held, leaving the list up to remove more from. Edged
+                            // as the list is, since on black ground it would read as a row of it.
+                            DropdownMenu(
+                                expanded = holding,
+                                onDismissRequest = { holding = false },
+                                shape = RectangleShape,
+                                border = BorderStroke(pixel, MaterialTheme.colorScheme.outlineVariant),
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Remove from list") },
+                                    onClick = {
+                                        holding = false
+                                        files.forget(file)
+                                    },
+                                )
+                            }
                         }
                         if (closable) CloseButton { files.close(file) }
                     }
