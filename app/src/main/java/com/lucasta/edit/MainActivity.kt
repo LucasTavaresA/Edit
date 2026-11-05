@@ -79,6 +79,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -466,6 +467,9 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                     // The outline's mid grey rather than onSurfaceVariant, which on black is near
                     // enough white that a name drawn in it could not be told from one that is not.
                     val quiet = MaterialTheme.colorScheme.outline
+                    // An unopened name a step brighter than that, so it still reads as a name
+                    // rather than as the place under it.
+                    val unopened = lerp(quiet, MaterialTheme.colorScheme.onSurface, 0.25f)
                     val closable = at > 0 && file.document != null
                     // As tall as the name and place, so the close button can take the row's height.
                     Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
@@ -489,8 +493,8 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                                     // and cut short for it rather than pushing it off the row.
                                     Modifier.weight(1f, fill = false),
                                     // One not opened, as a file brought back by a start or closed
-                                    // is until it is gone to, in the place's quieter colour.
-                                    color = if (file.document == null) quiet else Color.Unspecified,
+                                    // is until it is gone to, greyed.
+                                    color = if (file.document == null) unopened else Color.Unspecified,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
