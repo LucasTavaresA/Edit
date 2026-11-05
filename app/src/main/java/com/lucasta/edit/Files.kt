@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Process
+import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -298,20 +299,21 @@ class Files private constructor(private val context: Context) {
     /**
      * Takes every unopened file that is gone out of the list, without a word: done at a start, with
      * the list not yet on screen, so no row goes from under a finger reaching for it. One deleted
-     * while Edit runs is found when the user goes to it.
+     * while Edit runs is found when the user goes to it, and so is one a provider still answers for.
      */
     private suspend fun trim() {
         for (file in list.toList()) {
             val uri = file.uri ?: continue
-            if (file.document == null && context.isGone(uri)) list.remove(file)
+            if (file.document == null && context.seemsGone(uri)) list.remove(file)
         }
     }
 
     /** Goes to the file at [uri], opening it unless it is in the list already. */
     private suspend fun reach(uri: Uri) {
         list.firstOrNull { it.uri == uri }?.let { return reach(it) }
-        val document = read(uri, displayName(context, uri)) ?: return
-        val file = OpenFile(uri, displayName(context, uri), document)
+        val name = displayName(context, uri)
+        val document = read(uri, name) ?: return
+        val file = OpenFile(uri, name, document)
         top(file)
         say(file, file.name, Hold.Briefly)
     }
@@ -454,6 +456,23 @@ private suspend fun Context.isGone(uri: Uri): Boolean = !holdsAccess(uri) || wit
         true
     } catch (e: Exception) {
         // Anything else is a failure to open, which is said when the user goes to it.
+        false
+    }
+}
+
+/**
+ * [isGone] without opening the file, for every file in the list at once: a provider fetching from
+ * elsewhere would answer an open by fetching the file, and a start reads nothing. It asks for the
+ * file's name instead, which a documents provider answers with nothing for a file it cannot find.
+ * One that still answers for a file deleted behind its back, as MediaStore can, says it is there.
+ */
+private suspend fun Context.seemsGone(uri: Uri): Boolean = !holdsAccess(uri) || withContext(Dispatchers.IO) {
+    try {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { !it.moveToFirst() } ?: true
+    } catch (e: FileNotFoundException) {
+        true
+    } catch (e: Exception) {
         false
     }
 }
