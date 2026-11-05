@@ -326,7 +326,7 @@ private fun Editor(files: Files) {
                 Text(notice.text, Modifier.weight(1f))
                 // The file the bar is talking about, which is not always the one on screen.
                 if (notice.about?.document?.unsaved == true) Unsaved()
-                ListMark(files.list.size, up = false)
+                ListMark(files.list.size, files.list.count { it.document?.unsaved == true })
             }
             // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at
             // that width the rule reads as a bar across the screen rather than as a line under the
@@ -493,9 +493,6 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 if (file.document?.unsaved == true) Unsaved()
-                                // The bar's own mark, turned over: the row it is on goes to the
-                                // file already on screen, which only puts the list away.
-                                if (at == 0) ListMark(files.list.size, up = true)
                             }
                             Text(
                                 placeOf(file),
@@ -555,23 +552,26 @@ private fun Unsaved() {
 }
 
 /**
- * The end of the bar, saying it opens the list of files: how many are open, once there is more
- * than one, and a chevron, pointing down on the bar and [up] on the list's first row. The chevron
- * is drawn rather than a glyph, so no font decides how it looks.
+ * The end of the bar, saying it opens the list of files: once there is more than one, how many of
+ * them have edits not saved, in the unsaved mark's accent, and how many there are; then a chevron,
+ * drawn rather than a glyph, so no font decides how it looks.
  */
 @Composable
-private fun ListMark(count: Int, up: Boolean) {
+private fun ListMark(count: Int, unsaved: Int) {
     val color = MaterialTheme.colorScheme.onSurfaceVariant
+    val style = MaterialTheme.typography.labelMedium
     Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         if (count > 1) {
-            Text("$count", color = color, style = MaterialTheme.typography.labelMedium)
+            if (unsaved > 0) {
+                Text("$unsaved", Modifier.padding(end = 8.dp), MaterialTheme.colorScheme.primary, style = style)
+            }
+            Text("$count", color = color, style = style)
         }
         Canvas(Modifier.padding(start = 6.dp).size(width = 10.dp, height = 6.dp)) {
-            val (from, to) = if (up) size.height to 0f else 0f to size.height
             val chevron = Path().apply {
-                moveTo(0f, from)
-                lineTo(size.width / 2, to)
-                lineTo(size.width, from)
+                moveTo(0f, 0f)
+                lineTo(size.width / 2, size.height)
+                lineTo(size.width, 0f)
             }
             drawPath(chevron, color, style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
         }
