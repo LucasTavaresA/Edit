@@ -14,11 +14,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -37,8 +39,10 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ColorScheme
@@ -56,6 +60,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -68,7 +73,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -297,15 +306,20 @@ private fun Editor(files: Files) {
         if (!typing || notice.holding) {
             // A pixel above and below and nothing else: it is something to read rather than a
             // control, so it is as tall as its sentence and aligned with the text below. Tapping
-            // it brings the list of files up over it.
-            Text(
-                notice.text,
+            // it brings the list of files up over it, which the mark at its end says.
+            Row(
                 Modifier
                     .fillMaxWidth()
                     .onGloballyPositioned { barAt = it.boundsInRoot() }
                     .clickable { listing = true }
                     .padding(horizontal = 12.dp, vertical = pixel),
-            )
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(notice.text, Modifier.weight(1f))
+                // The file the bar is talking about, which is not always the one on screen.
+                if (notice.about?.document?.unsaved == true) Unsaved()
+                ListMark(files.list.size, up = false)
+            }
             // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at
             // that width the rule reads as a bar across the screen rather than as a line under the
             // toolbar.
@@ -381,9 +395,11 @@ private fun Editor(files: Files) {
 
 /**
  * The list of open files, brought up by tapping the bar that names the one on screen, which is the
- * first row and stands exactly where [bar], the bar's text, did, so the name does not move. The
- * rest follow below it in the list's order, an unsaved one marked. Going to a file, a tap anywhere
- * off the list, or Back puts it away through [close]. As plain as it can be for now.
+ * first row and stands exactly where [bar], the bar's text, did, with a rule under it as the bar
+ * has, so the name does not move. The rest follow below it in the list's order. Every row says
+ * where its file lives under its name, which is what tells two of the same name apart, and an
+ * unsaved one is marked as the bar marks it. Going to a file, a tap anywhere off the list, or Back
+ * puts it away through [close].
  */
 @Composable
 private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
@@ -394,6 +410,8 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
         Modifier
             .fillMaxSize()
             .onGloballyPositioned { origin = it.positionInRoot() }
+            // Dims what the list is over, so it reads as on top of the text rather than part of it.
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
             .pointerInput(Unit) { detectTapGestures { close() } }
     ) {
         val top = bar.top - origin.y
@@ -407,21 +425,87 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                 .verticalScroll(rememberScrollState())
         ) {
             files.list.forEachIndexed { at, file ->
-                Text(
-                    if (file.document?.unsaved == true) "${file.name} *" else file.name,
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            close()
-                            files.goTo(file)
+                key(file) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                close()
+                                files.goTo(file)
+                            }
+                            // The name on the first row a pixel down, where the bar's was, and
+                            // on the rest the same distance from the top as the place below it is
+                            // from the bottom.
+                            .padding(horizontal = 12.dp)
+                            .padding(top = if (at == 0) pixel else 8.dp, bottom = 8.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                file.name,
+                                Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (file.document?.unsaved == true) Unsaved()
+                            // The bar's own mark, turned over: the row it is on goes to the file
+                            // already on screen, which only puts the list away.
+                            if (at == 0) ListMark(files.list.size, up = true)
                         }
-                        // The first row the bar's own size, so its name sits where the bar's did,
-                        // and the rest a target a thumb can find.
-                        .padding(horizontal = 12.dp, vertical = if (at == 0) pixel else 10.dp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                        Text(
+                            placeOf(file),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            // A path says the most at its end, the folder the file is in.
+                            overflow = TextOverflow.StartEllipsis,
+                        )
+                    }
+                    if (at == 0) HorizontalDivider(thickness = pixel)
+                }
             }
+        }
+    }
+}
+
+/** Where [file] lives, told under its name; a new file says it is new, having nowhere yet. */
+@Composable
+private fun placeOf(file: OpenFile): String {
+    val context = LocalContext.current
+    val uri = file.uri
+    return remember(uri) { uri?.let { whereIs(context, it) }?.ifEmpty { null } ?: "new" }
+}
+
+/** The mark for a file with edits not saved: a dot in the accent, after its name. */
+@Composable
+private fun Unsaved() {
+    Box(
+        Modifier
+            .padding(start = 8.dp)
+            .size(8.dp)
+            .background(MaterialTheme.colorScheme.primary, CircleShape)
+    )
+}
+
+/**
+ * The end of the bar, saying it opens the list of files: how many are open, once there is more
+ * than one, and a chevron, pointing down on the bar and [up] on the list's first row. The chevron
+ * is drawn rather than a glyph, so no font decides how it looks.
+ */
+@Composable
+private fun ListMark(count: Int, up: Boolean) {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (count > 1) {
+            Text("$count", color = color, style = MaterialTheme.typography.labelMedium)
+        }
+        Canvas(Modifier.padding(start = 6.dp).size(width = 10.dp, height = 6.dp)) {
+            val (from, to) = if (up) size.height to 0f else 0f to size.height
+            val chevron = Path().apply {
+                moveTo(0f, from)
+                lineTo(size.width / 2, to)
+                lineTo(size.width, from)
+            }
+            drawPath(chevron, color, style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
         }
     }
 }

@@ -56,10 +56,8 @@ Two caps, both refused with our own message: 2 GB for plain files and a small on
 ## Not started
 
 - **Focus from a hardware keyboard's arrows puts the cursor at the start of the top row, which can be far above the screen.** A row is a whole chunk, so the cursor and the screen jump there. Rare, and left as it is.
-- **Two open files with the same name look identical in the list of open files.**
 - **Back, button and gesture alike, works like vim's jumplist**, stepping backwards through earlier cursor positions and across files. Until then it only sends Edit to the background.
 - **Find out what happens when memory runs out** with several big files opened.
-- **Make the multiple files UI better.** It was built as basic as it can be, the name bar and the list of files included.
 - **How long an unlocked encrypted file stays decrypted.** With multiple files it lives as long as a plain one, until Edit stops, so it sits readable in the background; better if it did not, but locking it on every switch is tiresome and gives files a second lifetime to manage. To be thought through later.
 - **A paste, a cut or a replace is an undo step of its own.** Today runs are joined by position and time alone, so a paste where the user was just typing joins that run and one press takes both back.
 - **What a text field gives that the editor does not yet.** Accessibility services see no editable field, so TalkBack can neither read the text as one nor edit it; a stylus cannot write into it; and a keyboard asking where the cursor is drawn on screen, for a floating preview or its own handwriting, is told nothing. None of them is anything a keyboard needs to type, select or edit.

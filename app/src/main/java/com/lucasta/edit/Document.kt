@@ -2,7 +2,10 @@ package com.lucasta.edit
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.system.Os
 import android.system.OsConstants
@@ -155,4 +158,63 @@ fun displayName(context: Context, uri: Uri): String {
             ?.use { if (it.moveToFirst()) it.getString(0) else null }
     }.getOrNull()
     return name ?: uri.lastPathSegment ?: uri.toString()
+}
+
+/** The phone's own storage, whose document ids are a volume and a path on it. */
+private const val STORAGE = "com.android.externalstorage.documents"
+
+/**
+ * Where [uri] lives: the folder, when the document id is a path or MediaStore says, and the app
+ * that provides it, unless that is the phone's own storage or MediaStore, whose folders say it all.
+ * It is what tells two files of the same name apart in the list.
+ */
+fun whereIs(context: Context, uri: Uri): String {
+    val authority = uri.authority.orEmpty()
+    mediaFolder(context, uri)?.let { return it }
+    val id = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull()
+    val folder = when {
+        id == null -> null
+        authority == STORAGE -> {
+            val volume = id.substringBefore(':')
+            val path = id.substringAfter(':', "").substringBeforeLast('/', "")
+            when {
+                volume != "primary" -> "$volume/$path".trimEnd('/')
+                path.isEmpty() -> "internal storage"
+                else -> path
+            }
+        }
+        // Downloads hands out ids like `raw:/storage/emulated/0/Download/a.txt`, and providers
+        // backed by a plain directory, Termux's among them, the absolute path itself.
+        id.removePrefix("raw:").startsWith('/') -> id.removePrefix("raw:").substringBeforeLast('/').ifEmpty { "/" }
+        else -> null
+    }
+    val app = if (authority == STORAGE) null else runCatching {
+        val packages = context.packageManager
+        packages.resolveContentProvider(authority, 0)?.loadLabel(packages)?.toString()
+    }.getOrNull() ?: authority
+    return listOfNotNull(app, folder).joinToString(" · ")
+}
+
+/**
+ * The providers behind the picker's Documents and Downloads views, whose links MediaStore can map to
+ * its own. Only these are asked: mapping is a call into the provider, made on the main thread as
+ * the list comes up, and these are the system's own, where any other is an app of its own whose
+ * process may have to start, or be busy, before it answers.
+ */
+private val MAPPED = setOf("com.android.providers.media.documents", "com.android.providers.downloads.documents")
+
+/** The folder MediaStore keeps [uri] in, for a MediaStore link or one it can map to its own. */
+private fun mediaFolder(context: Context, uri: Uri): String? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+    val media = when (uri.authority) {
+        MediaStore.AUTHORITY -> uri
+        in MAPPED -> runCatching { MediaStore.getMediaUri(context, uri) }.getOrNull() ?: return null
+        else -> return null
+    }
+    val path = runCatching {
+        context.contentResolver
+            .query(media, arrayOf(MediaStore.MediaColumns.RELATIVE_PATH), null, null, null)
+            ?.use { if (it.moveToFirst()) it.getString(0) else null }
+    }.getOrNull() ?: return null
+    return path.trimEnd('/').ifEmpty { "internal storage" }
 }
