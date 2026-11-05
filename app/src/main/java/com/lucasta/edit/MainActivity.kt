@@ -326,7 +326,7 @@ private fun Editor(files: Files) {
                 Text(notice.text, Modifier.weight(1f))
                 // The file the bar is talking about, which is not always the one on screen.
                 if (notice.about?.document?.unsaved == true) Unsaved()
-                ListMark(files.list.size, files.list.count { it.document?.unsaved == true })
+                ListMark(files.list.count { it.document != null }, files.list.count { it.document?.unsaved == true })
             }
             // One physical pixel, not one dp: a dense panel puts nearly three pixels in a dp, and at
             // that width the rule reads as a bar across the screen rather than as a line under the
@@ -431,9 +431,9 @@ private fun Editor(files: Files) {
 /**
  * The list of open files, brought up by tapping the bar that names the one on screen, which is the
  * first row and stands exactly where [bar], the bar's text, did, with a rule under it as the bar
- * has, so the name does not move. The rest follow below it in the list's order. Every row says
- * where its file lives under its name, which is what tells two of the same name apart, and an
- * unsaved one is marked as the bar marks it. Each opened one but the first ends in a button that
+ * has. The rest follow below it in the list's order. Every row says where its file lives under its
+ * name, which is what tells two of the same name apart, and an unsaved one has the bar's mark right
+ * after its name. Each opened one but the first ends in a button that
  * closes its file and leaves the list up; one not opened has nothing to close, and the one on
  * screen is not closed from here, so neither has a button. Going to a file, a tap anywhere off the
  * list, or Back puts it away through [close].
@@ -485,7 +485,9 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     file.name,
-                                    Modifier.weight(1f),
+                                    // Only as wide as the name, so the mark sits right after it,
+                                    // and cut short for it rather than pushing it off the row.
+                                    Modifier.weight(1f, fill = false),
                                     // One not opened, as a file brought back by a start or closed
                                     // is until it is gone to, in the place's quieter colour.
                                     color = if (file.document == null) quiet else Color.Unspecified,
@@ -540,7 +542,10 @@ private fun CloseButton(onClick: () -> Unit) {
     }
 }
 
-/** The mark for a file with edits not saved: a dot in the accent, after its name. */
+/**
+ * The mark for a file with edits not saved: a dot in the accent, at the end of the bar's text and
+ * right after a name in the list.
+ */
 @Composable
 private fun Unsaved() {
     Box(
@@ -552,20 +557,21 @@ private fun Unsaved() {
 }
 
 /**
- * The end of the bar, saying it opens the list of files: once there is more than one, how many of
- * them have edits not saved, in the unsaved mark's accent, and how many there are; then a chevron,
- * drawn rather than a glyph, so no font decides how it looks.
+ * The end of the bar, saying it opens the list of files: once more than one is [opened], how many
+ * of them have edits not saved, in the unsaved mark's accent, and how many are opened, since the
+ * list is recent files and its length says nothing; then a chevron, drawn rather than a glyph, so
+ * no font decides how it looks.
  */
 @Composable
-private fun ListMark(count: Int, unsaved: Int) {
+private fun ListMark(opened: Int, unsaved: Int) {
     val color = MaterialTheme.colorScheme.onSurfaceVariant
     val style = MaterialTheme.typography.labelMedium
     Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (count > 1) {
+        if (opened > 1) {
             if (unsaved > 0) {
                 Text("$unsaved", Modifier.padding(end = 8.dp), MaterialTheme.colorScheme.primary, style = style)
             }
-            Text("$count", color = color, style = style)
+            Text("$opened", color = color, style = style)
         }
         Canvas(Modifier.padding(start = 6.dp).size(width = 10.dp, height = 6.dp)) {
             val chevron = Path().apply {
