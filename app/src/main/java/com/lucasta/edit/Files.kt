@@ -3,13 +3,16 @@ package com.lucasta.edit
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Process
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -59,7 +62,7 @@ class Notice(val text: String, val hold: Hold, val about: OpenFile?) {
 
 /**
  * One file in the list, with everything that is its own. Unopened, with no [document], until the
- * user first goes to it, which only a file brought back by a start ever is.
+ * user goes to it, which a file brought back by a start or closed ever is.
  */
 class OpenFile(uri: Uri?, name: String, document: DocumentState? = null, said: String = name) {
     /** The file behind it, or null for one that has never been saved. */
@@ -67,7 +70,7 @@ class OpenFile(uri: Uri?, name: String, document: DocumentState? = null, said: S
 
     var name by mutableStateOf(name)
 
-    /** Once opened, it stays opened, private copy included, until Edit stops. */
+    /** Once opened, it stays opened, private copy included, until it is closed or Edit stops. */
     var document by mutableStateOf(document)
 
     /** The last thing said about it, which is what the bar says when it is gone to. */
@@ -82,6 +85,16 @@ class OpenFile(uri: Uri?, name: String, document: DocumentState? = null, said: S
 
     /** Whether a save found the file changed, and whose version wins is waiting on the user. */
     var asking by mutableStateOf(false)
+
+    /** Whether closing it with edits not saved is waiting on the user: save, close or nevermind. */
+    var closing by mutableStateOf(false)
+
+    /**
+     * Whether its access outlasts the process, so that unopened it can still be written down for
+     * the next start. Not so for one another app handed over for the process alone, which closed
+     * stays in the list only until Edit stops.
+     */
+    var lasting = false
 
     /** New and never touched: leaving the list loses nothing, not even something to undo. */
     val untouched: Boolean
@@ -193,7 +206,36 @@ class Files private constructor(private val context: Context) {
         }
     }
 
-    fun saveAs(file: OpenFile, target: Uri) = inTurn { write(file, target, anyway = true) }
+    /** Saves [file] into [target], and then closes it if [close] and the save left nothing unsaved. */
+    fun saveAs(file: OpenFile, target: Uri, close: Boolean = false) = inTurn {
+        write(file, target, anyway = true)
+        if (close) closeIfSaved(file)
+    }
+
+    /**
+     * The close button on [file]'s row. Closing loses whatever was not saved, so a file with edits
+     * not saved asks first, through [OpenFile.closing]; one without closes straight away.
+     */
+    fun close(file: OpenFile) {
+        if (file.document?.unsaved == true) file.closing = true else discard(file)
+    }
+
+    /** Closes [file] whatever it holds, the answer Close. */
+    fun discard(file: OpenFile) = inTurn { unload(file) }
+
+    /**
+     * Saves [file] where it already lives and closes it, the answer Save for a file that has one. A
+     * save that finds the file changed asks about that instead and leaves it open, as does one
+     * that fails, and so does typing that lands while it runs.
+     */
+    fun saveAndClose(file: OpenFile) = inTurn {
+        file.uri?.let { write(file, it, anyway = false) }
+        closeIfSaved(file)
+    }
+
+    private suspend fun closeIfSaved(file: OpenFile) {
+        if (file.document?.unsaved == false && !file.asking) unload(file)
+    }
 
     /** The answer to [OpenFile.asking]: the document goes over whatever the file holds now. */
     fun overwrite(file: OpenFile) = inTurn { file.uri?.let { write(file, it, anyway = true) } }
@@ -218,6 +260,32 @@ class Files private constructor(private val context: Context) {
         bar = file.notice
     }
 
+    /**
+     * Lets [file]'s document go, private copy included, and leaves it in the list unopened where it
+     * was, so the list stays the files most recently gone to. A new one has nothing to come back
+     * as and leaves the list. The file on screen gives way to the next in the list that opens, and
+     * to a new one if none does. Run in turn, so no save of it is running and none waits behind.
+     */
+    private suspend fun unload(file: OpenFile) {
+        if (file !in list || file.document == null) return
+        if (file === current) {
+            for (next in list.drop(1)) {
+                if (current !== file) break
+                reach(next)
+            }
+            if (current === file) top(untitled())
+        }
+        if (file.uri == null) list.remove(file)
+        if (bar.about === file) bar = current.notice
+        val document = file.document ?: return
+        file.document = null
+        // Not while the screen may still be drawing it: the switch away reaches the editor at the
+        // next frame, so the document goes the frame after.
+        awaitFrame()
+        awaitFrame()
+        document.close()
+    }
+
     /** Goes to the file at [uri], opening it unless it is in the list already. */
     private suspend fun reach(uri: Uri) {
         list.firstOrNull { it.uri == uri }?.let { return reach(it) }
@@ -229,14 +297,14 @@ class Files private constructor(private val context: Context) {
 
     /**
      * Goes to [file], opening it as it stands now if it has not been. A file whose access has gone
-     * leaves the list, which is the only way anything does; one that fails to open for any other
-     * reason stays, unopened, and the screen stays where it was.
+     * leaves the list, the one way a file with a link ever does; one that fails to open for any
+     * other reason stays, unopened, and the screen stays where it was.
      */
     private suspend fun reach(file: OpenFile) {
         if (file !in list) return
         if (file.document == null) {
             val uri = checkNotNull(file.uri) { "only a file with a link is ever unopened" }
-            if (!context.contentResolver.holdsAccess(uri)) {
+            if (!context.holdsAccess(uri)) {
                 list.remove(file)
                 say(null, "could not open ${file.name}: it is gone", Hold.UntilSeen)
                 return
@@ -308,7 +376,7 @@ class Files private constructor(private val context: Context) {
         for (i in 0 until files.length()) {
             val file = files.optJSONObject(i) ?: continue
             val uri = file.optString("uri").takeIf { it.isNotEmpty() } ?: continue
-            list.add(OpenFile(Uri.parse(uri), file.optString("name", uri)))
+            list.add(OpenFile(Uri.parse(uri), file.optString("name", uri)).also { it.lasting = true })
         }
         return kept.getBoolean("focused", false)
     }
@@ -317,13 +385,16 @@ class Files private constructor(private val context: Context) {
      * Writes the list down for the next start, keeping access to every file in it, writing included
      * where that was given. A file whose access ends with the process, as another app handing one
      * over usually gives, is left out, and so is a new one, which has nothing to come back as. One
-     * still unopened is written down whatever its access, since it can only have come from here,
-     * and its access having gone is said when the user goes to it. Every grant held for a file
-     * not in the list is let go.
+     * unopened whose access was kept is written down whatever its access now, and its access having
+     * gone is said when the user goes to it. Every grant held for a file not in the list is let go.
      */
     private fun keep() {
         val resolver = context.contentResolver
-        val kept = list.filter { file -> file.uri?.let { file.document == null || resolver.keepAccess(it) } ?: false }
+        val kept = list.filter { file ->
+            val uri = file.uri ?: return@filter false
+            file.lasting = file.document == null && file.lasting || resolver.keepAccess(uri)
+            file.lasting
+        }
         val links = kept.mapTo(HashSet()) { it.uri }
         for (held in resolver.persistedUriPermissions) {
             if (held.uri in links) continue
@@ -349,10 +420,14 @@ class Files private constructor(private val context: Context) {
 }
 
 /**
- * Whether the access kept to [uri] is still held. A provider lets go of it once the file is
- * deleted, and after that the file cannot be opened or even named.
+ * Whether access to [uri] is still held: kept past the process, or given for the process alone to
+ * a file closed since. A provider lets go of it once the file is deleted, and after that the file
+ * cannot be opened or even named.
  */
-private fun ContentResolver.holdsAccess(uri: Uri): Boolean = persistedUriPermissions.any { it.uri == uri }
+private fun Context.holdsAccess(uri: Uri): Boolean =
+    contentResolver.persistedUriPermissions.any { it.uri == uri } ||
+        checkUriPermission(uri, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION) ==
+        PackageManager.PERMISSION_GRANTED
 
 /**
  * Keeps access to [uri] past the process, writing included where that was given, and says whether

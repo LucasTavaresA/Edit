@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
@@ -228,6 +229,9 @@ private fun Editor(files: Files) {
     /** The file Save as was asked for, which is not always the one on screen by the time it answers. */
     var savingAs by remember { mutableStateOf<OpenFile?>(null) }
 
+    /** Whether that Save as is the answer Save to closing a new file, which closes it once saved. */
+    var closingAfter by remember { mutableStateOf(false) }
+
     LaunchedEffect(notice) {
         if (notice.holding) {
             if (notice.hold == Hold.UntilSeen) {
@@ -254,12 +258,16 @@ private fun Editor(files: Files) {
     val saveAs = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { created ->
         val file = savingAs
         savingAs = null
-        if (created != null && file != null) files.saveAs(file, created)
+        if (created != null && file != null) files.saveAs(file, created, close = closingAfter)
     }
 
-    /** Asks where [file] is to be saved as, and saves it there once that is answered. */
-    fun pickTarget(file: OpenFile) {
+    /**
+     * Asks where [file] is to be saved as, and saves it there once that is answered, closing it
+     * after if [close].
+     */
+    fun pickTarget(file: OpenFile, close: Boolean = false) {
         savingAs = file
+        closingAfter = close
         saveAs.launch(file.name)
     }
 
@@ -391,6 +399,33 @@ private fun Editor(files: Files) {
             },
         )
     }
+
+    // Closing is asked from the list, so this comes up over it, and the list stays up behind it to
+    // close more from.
+    val closing = files.list.firstOrNull { it.closing }
+    if (closing != null) {
+        AlertDialog(
+            onDismissRequest = { closing.closing = false },
+            title = { Text("Do you want to save ${closing.name} before closing it?") },
+            text = { Text("It has edits that are not saved. Closing without saving throws them away.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    closing.closing = false
+                    // A new file has nowhere to be saved yet, so Save asks where, as Save as does.
+                    if (closing.uri != null) files.saveAndClose(closing) else pickTarget(closing, close = true)
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        closing.closing = false
+                        files.discard(closing)
+                    }) { Text("Close") }
+                    TextButton(onClick = { closing.closing = false }) { Text("Nevermind") }
+                }
+            },
+        )
+    }
 }
 
 /**
@@ -398,8 +433,10 @@ private fun Editor(files: Files) {
  * first row and stands exactly where [bar], the bar's text, did, with a rule under it as the bar
  * has, so the name does not move. The rest follow below it in the list's order. Every row says
  * where its file lives under its name, which is what tells two of the same name apart, and an
- * unsaved one is marked as the bar marks it. Going to a file, a tap anywhere off the list, or Back
- * puts it away through [close].
+ * unsaved one is marked as the bar marks it. Each opened one but the first ends in a button that
+ * closes its file and leaves the list up; one not opened has nothing to close, and the one on
+ * screen is not closed from here, so neither has a button. Going to a file, a tap anywhere off the
+ * list, or Back puts it away through [close].
  */
 @Composable
 private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
@@ -426,39 +463,50 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
         ) {
             files.list.forEachIndexed { at, file ->
                 key(file) {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                close()
-                                files.goTo(file)
+                    // The outline's mid grey rather than onSurfaceVariant, which on black is near
+                    // enough white that a name drawn in it could not be told from one that is not.
+                    val quiet = MaterialTheme.colorScheme.outline
+                    val closable = at > 0 && file.document != null
+                    // As tall as the name and place, so the close button can take the row's height.
+                    Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .clickable {
+                                    close()
+                                    files.goTo(file)
+                                }
+                                // The name on the first row a pixel down, where the bar's was,
+                                // and on the rest the same distance from the top as the place
+                                // below it is from the bottom.
+                                .padding(start = 12.dp, end = if (closable) 0.dp else 12.dp)
+                                .padding(top = if (at == 0) pixel else 8.dp, bottom = 8.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    file.name,
+                                    Modifier.weight(1f),
+                                    // One not opened, as a file brought back by a start or closed
+                                    // is until it is gone to, in the place's quieter colour.
+                                    color = if (file.document == null) quiet else Color.Unspecified,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (file.document?.unsaved == true) Unsaved()
+                                // The bar's own mark, turned over: the row it is on goes to the
+                                // file already on screen, which only puts the list away.
+                                if (at == 0) ListMark(files.list.size, up = true)
                             }
-                            // The name on the first row a pixel down, where the bar's was, and
-                            // on the rest the same distance from the top as the place below it is
-                            // from the bottom.
-                            .padding(horizontal = 12.dp)
-                            .padding(top = if (at == 0) pixel else 8.dp, bottom = 8.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                file.name,
-                                Modifier.weight(1f),
+                                placeOf(file),
+                                color = quiet,
+                                style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                                // A path says the most at its end, the folder the file is in.
+                                overflow = TextOverflow.StartEllipsis,
                             )
-                            if (file.document?.unsaved == true) Unsaved()
-                            // The bar's own mark, turned over: the row it is on goes to the file
-                            // already on screen, which only puts the list away.
-                            if (at == 0) ListMark(files.list.size, up = true)
                         }
-                        Text(
-                            placeOf(file),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            // A path says the most at its end, the folder the file is in.
-                            overflow = TextOverflow.StartEllipsis,
-                        )
+                        if (closable) CloseButton { files.close(file) }
                     }
                     if (at == 0) HorizontalDivider(thickness = pixel)
                 }
@@ -473,6 +521,26 @@ private fun placeOf(file: OpenFile): String {
     val context = LocalContext.current
     val uri = file.uri
     return remember(uri) { uri?.let { whereIs(context, it) }?.ifEmpty { null } ?: "new" }
+}
+
+/**
+ * The close button at the end of a row in the list: a cross drawn as the chevron is, on a target
+ * the row's full height and wide enough for a thumb, apart from the rest of the row, which goes to
+ * the file.
+ */
+@Composable
+private fun CloseButton(onClick: () -> Unit) {
+    val color = MaterialTheme.colorScheme.onSurfaceVariant
+    Box(
+        Modifier.fillMaxHeight().width(48.dp).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(10.dp)) {
+            val stroke = 1.5.dp.toPx()
+            drawLine(color, Offset.Zero, Offset(size.width, size.height), stroke, StrokeCap.Round)
+            drawLine(color, Offset(size.width, 0f), Offset(0f, size.height), stroke, StrokeCap.Round)
+        }
+    }
 }
 
 /** The mark for a file with edits not saved: a dot in the accent, after its name. */
