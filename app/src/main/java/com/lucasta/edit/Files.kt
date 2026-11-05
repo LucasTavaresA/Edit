@@ -11,11 +11,14 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import java.io.FileNotFoundException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -152,7 +155,8 @@ class Files private constructor(private val context: Context) {
                 handed != null -> reach(handed)
                 focused && list.size > 1 -> reach(list[1])
             }
-            // Only once that has had its turn: a file it found gone has left the list by then.
+            trim()
+            // Only once those have had their turn: a file found gone has left the list by then.
             scope.launch {
                 snapshotFlow { list.map { Triple(it.uri, it.name, it.document == null) } }.collect { keep() }
             }
@@ -286,6 +290,18 @@ class Files private constructor(private val context: Context) {
         document.close()
     }
 
+    /**
+     * Takes every unopened file that is gone out of the list, without a word: done at a start, with
+     * the list not yet on screen, so no row goes from under a finger reaching for it. One deleted
+     * while Edit runs is found when the user goes to it.
+     */
+    private suspend fun trim() {
+        for (file in list.toList()) {
+            val uri = file.uri ?: continue
+            if (file.document == null && context.isGone(uri)) list.remove(file)
+        }
+    }
+
     /** Goes to the file at [uri], opening it unless it is in the list already. */
     private suspend fun reach(uri: Uri) {
         list.firstOrNull { it.uri == uri }?.let { return reach(it) }
@@ -296,15 +312,15 @@ class Files private constructor(private val context: Context) {
     }
 
     /**
-     * Goes to [file], opening it as it stands now if it has not been. A file whose access has gone
-     * leaves the list, the one way a file with a link ever does; one that fails to open for any
-     * other reason stays, unopened, and the screen stays where it was.
+     * Goes to [file], opening it as it stands now if it has not been. A file that is gone leaves the
+     * list, the one way a file with a link ever does besides [trim]; one that fails to open for
+     * any other reason stays, unopened, and the screen stays where it was.
      */
     private suspend fun reach(file: OpenFile) {
         if (file !in list) return
         if (file.document == null) {
             val uri = checkNotNull(file.uri) { "only a file with a link is ever unopened" }
-            if (!context.holdsAccess(uri)) {
+            if (context.isGone(uri)) {
                 list.remove(file)
                 say(null, "could not open ${file.name}: it is gone", Hold.UntilSeen)
                 return
@@ -416,6 +432,24 @@ class Files private constructor(private val context: Context) {
 
         /** The process's list, made the first time anything asks for it. Main thread only. */
         fun of(context: Context): Files = made ?: Files(context.applicationContext).also { made = it }
+    }
+}
+
+/**
+ * Whether the file at [uri] is gone: its access let go, as a provider does once it deletes the
+ * file, or nothing there to open, as when something deleted it behind the provider's back, which
+ * leaves the access held. Not found is taken at its word, so a file on storage that is not mounted
+ * counts as gone too.
+ */
+private suspend fun Context.isGone(uri: Uri): Boolean = !holdsAccess(uri) || withContext(Dispatchers.IO) {
+    try {
+        contentResolver.openFileDescriptor(uri, "r")?.close()
+        false
+    } catch (e: FileNotFoundException) {
+        true
+    } catch (e: Exception) {
+        // Anything else is a failure to open, which is said when the user goes to it.
+        false
     }
 }
 
