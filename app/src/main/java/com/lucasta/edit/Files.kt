@@ -173,10 +173,15 @@ class Files private constructor(private val context: Context) {
         bar = notice
     }
 
-    /** [notice] has held as long as it was going to. If it was about a file behind, the bar goes back. */
+    /**
+     * [notice] has held as long as it was going to. Unless it was about the file on screen, the bar
+     * goes back to that file's own, so it never goes on naming another file or none, or hiding the
+     * mark for edits not saved. "Opening", about no file and never held, stays: it is always
+     * followed by what came of it.
+     */
     fun settled(notice: Notice) {
         notice.holding = false
-        if (bar === notice && notice.about != null && notice.about !== current) bar = current.notice
+        if (bar === notice && notice.about !== current && notice.hold != Hold.Never) bar = current.notice
     }
 
     /** Opens [uri], or goes to it if it is open already. */
