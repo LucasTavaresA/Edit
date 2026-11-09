@@ -54,6 +54,7 @@ import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.Density
@@ -117,6 +118,8 @@ internal fun SelectionLayer(
     val refusal by rememberUpdatedState(refuse)
     val handles = LocalTextSelectionColors.current.handleColor
     val context = LocalContext.current
+    // Read as the menu is shown, by an effect that outlives a configuration change.
+    val resources by rememberUpdatedState(LocalResources.current)
     val view = LocalView.current
     val toolbar = remember(view) { TextMenu(view) }
     val haptics = LocalHapticFeedback.current
@@ -169,10 +172,10 @@ internal fun SelectionLayer(
                     state.mark(found.range)
                 }
             }
-            if (selection) items += context.getString(android.R.string.copy) to { if (clip.copy()) state.deselect() }
-            if (clip.hasText) items += context.getString(android.R.string.paste) to { clip.paste(); cursorMenu = null }
-            if (selection) items += context.getString(android.R.string.cut) to { clip.cut() }
-            items += context.getString(android.R.string.selectAll) to {
+            if (selection) items += resources.getString(android.R.string.copy) to { if (clip.copy()) state.deselect() }
+            if (clip.hasText) items += resources.getString(android.R.string.paste) to { clip.paste(); cursorMenu = null }
+            if (selection) items += resources.getString(android.R.string.cut) to { clip.cut() }
+            items += resources.getString(android.R.string.selectAll) to {
                 cursorMenu = null
                 state.selectAll()
             }

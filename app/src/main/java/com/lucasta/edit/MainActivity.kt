@@ -91,6 +91,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
@@ -169,7 +170,7 @@ private fun systemColorScheme(dark: Boolean = isSystemInDarkTheme()): ColorSchem
 @RequiresApi(Build.VERSION_CODES.S)
 @Composable
 private fun ColorScheme.accentedLikeTheSystem(dark: Boolean): ColorScheme {
-    val resources = LocalContext.current.resources
+    val resources = LocalResources.current
     fun tone(id: Int) = Color(resources.getColor(id, null))
     return if (dark) copy(
         primary = tone(android.R.color.system_accent1_200),
