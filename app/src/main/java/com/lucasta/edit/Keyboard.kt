@@ -16,6 +16,7 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputContentInfo
 import android.view.inputmethod.InputMethodManager
 import android.view.inputmethod.SurroundingText
+import androidx.annotation.RequiresApi
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusEventModifierNode
@@ -371,6 +372,7 @@ private class Link(private val keyboard: Keyboard) : InputConnection {
         return state.textAt(now.min, now.max)
     }
 
+    @RequiresApi(Build.VERSION_CODES.S)
     override fun getSurroundingText(beforeLength: Int, afterLength: Int, flags: Int): SurroundingText? {
         if (closed) return null
         val now = state.selectionChars() ?: return null
