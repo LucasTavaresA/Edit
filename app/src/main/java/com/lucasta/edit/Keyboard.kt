@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusEventModifierNode
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.node.ModifierNodeElement
+import androidx.compose.ui.platform.InspectorInfo
 import androidx.compose.ui.platform.PlatformTextInputModifierNode
 import androidx.compose.ui.platform.establishTextInputSession
 import androidx.compose.ui.text.TextRange
@@ -64,6 +65,11 @@ internal class KeyboardElement(private val state: DocumentState, private val cli
     override fun equals(other: Any?) = other is KeyboardElement && other.state === state && other.clip === clip
 
     override fun hashCode() = 31 * state.hashCode() + clip.hashCode()
+
+    // A name alone: left to itself the layout inspector would read the whole document by reflection.
+    override fun InspectorInfo.inspectableProperties() {
+        name = "keyboard"
+    }
 }
 
 internal class KeyboardNode(private var state: DocumentState, private var clip: Clip) :
