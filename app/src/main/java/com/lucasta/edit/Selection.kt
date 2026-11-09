@@ -5,7 +5,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.text.SpannableString
 import android.text.style.URLSpan
 import android.text.util.Linkify
@@ -59,6 +58,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
@@ -162,7 +162,7 @@ internal fun SelectionLayer(
             if (found != null) {
                 items += "Open ${found.kind}" to {
                     try {
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(found.url)))
+                        context.startActivity(Intent(Intent.ACTION_VIEW, found.url.toUri()))
                     } catch (e: ActivityNotFoundException) {
                         refusal("could not open ${found.url}: nothing on the phone opens it")
                     }

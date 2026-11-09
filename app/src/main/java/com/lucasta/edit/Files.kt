@@ -12,6 +12,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import java.io.FileNotFoundException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
@@ -443,7 +445,7 @@ class Files private constructor(private val context: Context) {
         for (i in 0 until files.length()) {
             val file = files.optJSONObject(i) ?: continue
             val uri = file.optString("uri").takeIf { it.isNotEmpty() } ?: continue
-            list.add(OpenFile(Uri.parse(uri), file.optString("name", uri)).also { it.lasting = true })
+            list.add(OpenFile(uri.toUri(), file.optString("name", uri)).also { it.lasting = true })
         }
         return kept.getBoolean("focused", false)
     }
@@ -472,10 +474,10 @@ class Files private constructor(private val context: Context) {
         }
         val files = JSONArray()
         for (file in kept) files.put(JSONObject().put("uri", file.uri.toString()).put("name", file.name))
-        context.getSharedPreferences(KEPT, Context.MODE_PRIVATE).edit()
-            .putString("files", files.toString())
-            .putBoolean("focused", kept.firstOrNull() === current)
-            .apply()
+        context.getSharedPreferences(KEPT, Context.MODE_PRIVATE).edit {
+            putString("files", files.toString())
+            putBoolean("focused", kept.firstOrNull() === current)
+        }
     }
 
     companion object {

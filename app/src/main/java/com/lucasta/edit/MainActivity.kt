@@ -98,6 +98,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.core.content.edit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
@@ -347,7 +348,7 @@ private fun Editor(files: Files) {
             scale = scale,
             rescale = {
                 scale = it
-                looks.edit().putFloat("scale", it).apply()
+                looks.edit { putFloat("scale", it) }
             },
         )
         HorizontalDivider(thickness = pixel)
