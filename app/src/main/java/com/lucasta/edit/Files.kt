@@ -1,5 +1,6 @@
 package com.lucasta.edit
 
+import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
@@ -481,6 +482,9 @@ class Files private constructor(private val context: Context) {
     }
 
     companion object {
+        // Only of() makes one, and it hands over the application context, which lives as long as
+        // the process; the list being the process's is the point.
+        @SuppressLint("StaticFieldLeak")
         private var made: Files? = null
 
         /** The process's list, made the first time anything asks for it. Main thread only. */
