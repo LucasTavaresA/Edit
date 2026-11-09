@@ -252,6 +252,16 @@ class Files private constructor(private val context: Context) {
         if (bar.about.let { it != null && it !in list }) bar = current.notice
     }
 
+    /**
+     * Takes every file out of the list as [forget] takes each, so one with edits not saved asks on
+     * its own and Nevermind keeps that one alone. The unopened go first and the one on screen last,
+     * so giving way to the next never opens a file only for it to go too.
+     */
+    fun forgetAll() {
+        val screen = current
+        for (file in list.sortedBy { if (it.document == null) 0 else if (it === screen) 2 else 1 }) forget(file)
+    }
+
     /** The answer Nevermind: [file] stays as it is, opened and in the list. */
     fun keepOpen(file: OpenFile) {
         file.closing = false

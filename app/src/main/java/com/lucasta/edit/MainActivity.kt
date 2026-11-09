@@ -441,7 +441,7 @@ private fun Editor(files: Files) {
  * after its name. Each opened one but the first ends in a button that
  * closes its file and leaves the list up; one not opened has nothing to close, and the one on
  * screen is not closed from here, so neither has a button. Holding any row offers to remove it from
- * the list, or to remove every unopened one after asking. Going to a file, a tap anywhere off the list, or Back puts it away through [close].
+ * the list, or after asking to remove every unopened one or every one. Going to a file, a tap anywhere off the list, or Back puts it away through [close].
  */
 @Composable
 private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
@@ -463,6 +463,28 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                 }) { Text("Remove") }
             },
             dismissButton = { TextButton(onClick = { clearing = false }) { Text("Nevermind") } },
+        )
+    }
+    // Removing every file asks the same way first; past that, each with edits not saved asks on
+    // its own, as its close button would.
+    var emptying by remember { mutableStateOf(false) }
+    if (emptying) {
+        AlertDialog(
+            onDismissRequest = { emptying = false },
+            title = { Text("Remove all ${files.list.size} files from the list?") },
+            text = {
+                Text(
+                    "The files themselves stay where they are; only the list forgets them. Each one " +
+                        "with edits that are not saved asks before it goes."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    emptying = false
+                    files.forgetAll()
+                }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { emptying = false }) { Text("Nevermind") } },
         )
     }
     val density = LocalDensity.current
@@ -554,6 +576,14 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                                     onClick = {
                                         holding = false
                                         clearing = true
+                                    },
+                                )
+                                // With one row it would be Remove from list again.
+                                if (files.list.size > 1) DropdownMenuItem(
+                                    text = { Text("Remove everything") },
+                                    onClick = {
+                                        holding = false
+                                        emptying = true
                                     },
                                 )
                             }
