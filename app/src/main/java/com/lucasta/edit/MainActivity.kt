@@ -409,11 +409,10 @@ private fun Editor(files: Files) {
     // close more from.
     val closing = files.list.firstOrNull { it.closing }
     if (closing != null) {
-        val doing = if (closing.forgetting) "removing it from the list" else "closing it"
         AlertDialog(
             onDismissRequest = { files.keepOpen(closing) },
-            title = { Text("Do you want to save ${closing.name} before $doing?") },
-            text = { Text("It has edits that are not saved. ${if (closing.forgetting) "Removing" else "Closing"} without saving throws them away.") },
+            title = { Text("Do you want to save ${closing.name} before closing it?") },
+            text = { Text("It has edits that are not saved. Closing without saving throws them away.") },
             confirmButton = {
                 TextButton(onClick = {
                     closing.closing = false
@@ -426,7 +425,7 @@ private fun Editor(files: Files) {
                     TextButton(onClick = {
                         closing.closing = false
                         files.discard(closing)
-                    }) { Text(if (closing.forgetting) "Remove" else "Close") }
+                    }) { Text("Close") }
                     TextButton(onClick = { files.keepOpen(closing) }) { Text("Nevermind") }
                 }
             },
