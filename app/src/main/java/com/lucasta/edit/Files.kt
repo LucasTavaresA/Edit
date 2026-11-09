@@ -485,7 +485,8 @@ class Files private constructor(private val context: Context) {
         // Only of() makes one, and it hands over the application context, which lives as long as
         // the process; the list being the process's is the point.
         @SuppressLint("StaticFieldLeak")
-        private var made: Files? = null
+        internal var made: Files? = null
+            private set
 
         /** The process's list, made the first time anything asks for it. Main thread only. */
         fun of(context: Context): Files = made ?: Files(context.applicationContext).also { made = it }
