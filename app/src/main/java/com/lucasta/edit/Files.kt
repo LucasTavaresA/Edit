@@ -243,6 +243,15 @@ class Files private constructor(private val context: Context) {
         if (file.document?.unsaved == true) file.closing = true else discard(file)
     }
 
+    /**
+     * Takes every file not opened out of the list, the files themselves untouched, as [forget] does
+     * one by one. Those still unopened when its turn comes, so one being opened meanwhile stays.
+     */
+    fun forgetUnopened() = inTurn {
+        list.removeAll { it.document == null }
+        if (bar.about.let { it != null && it !in list }) bar = current.notice
+    }
+
     /** The answer Nevermind: [file] stays as it is, opened and in the list. */
     fun keepOpen(file: OpenFile) {
         file.closing = false
@@ -345,7 +354,7 @@ class Files private constructor(private val context: Context) {
 
     /**
      * Goes to [file], opening it as it stands now if it has not been. A file that is gone leaves the
-     * list, the one way a file with a link ever does besides [trim] and [forget]; one that fails to open for
+     * list, the one way a file with a link ever does besides [trim], [forget] and [forgetUnopened]; one that fails to open for
      * any other reason stays, unopened, and the screen stays where it was.
      */
     private suspend fun reach(file: OpenFile) {

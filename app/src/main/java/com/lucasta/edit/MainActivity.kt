@@ -442,12 +442,30 @@ private fun Editor(files: Files) {
  * after its name. Each opened one but the first ends in a button that
  * closes its file and leaves the list up; one not opened has nothing to close, and the one on
  * screen is not closed from here, so neither has a button. Holding any row offers to remove it from
- * the list. Going to a file, a tap anywhere off the list, or Back puts it away through [close].
+ * the list, or to remove every unopened one after asking. Going to a file, a tap anywhere off the list, or Back puts it away through [close].
  */
 @Composable
 private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
     BackHandler(onBack = close)
     var origin by remember { mutableStateOf(Offset.Zero) }
+    // Removing every unopened file asks first, since it takes many rows at once; over the list,
+    // which stays up behind it.
+    var clearing by remember { mutableStateOf(false) }
+    val unopenedFiles = files.list.count { it.document == null }
+    if (clearing && unopenedFiles > 0) {
+        AlertDialog(
+            onDismissRequest = { clearing = false },
+            title = { Text("Remove ${if (unopenedFiles == 1) "the unopened file" else "the $unopenedFiles unopened files"} from the list?") },
+            text = { Text("The files themselves stay where they are; only the list forgets them.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    clearing = false
+                    files.forgetUnopened()
+                }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { clearing = false }) { Text("Nevermind") } },
+        )
+    }
     val density = LocalDensity.current
     BoxWithConstraints(
         Modifier
@@ -530,6 +548,13 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
                                     onClick = {
                                         holding = false
                                         files.forget(file)
+                                    },
+                                )
+                                if (unopenedFiles > 0) DropdownMenuItem(
+                                    text = { Text("Remove all unopened") },
+                                    onClick = {
+                                        holding = false
+                                        clearing = true
                                     },
                                 )
                             }
