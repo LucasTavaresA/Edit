@@ -1,8 +1,8 @@
 # Edit
 
-I want to ultimately make a bare text editing app, i also want it to handle encrypted files and open everything else normally, cause other apps and encryption tools are too complex, have their custom sync and format, i want to have it all locally sync-able with any tool.
+I want to ultimately have a text editing app, i also want it to handle encrypted files and open everything else normally, cause other apps and encryption tools are too complex, have their custom sync and format, i want to have it all locally sync-able with any tool.
 
-You maintain PROGRESS.md which tracks our progress and keep all info across compaction's, read it fully at the beggining of every conversation.
+You maintain PROGRESS.md which tracks our progress and keep all info across compactions, read it fully at the beginning of every conversation, it strictly defines what we have and needs to be explicitly decided against with me when going to a different direction.
 
 We maintain CLAUDE.md, but avoid modifying things here as much as you can, try to append instead, add things that don't fit PROGRESS.md here, organize into sections.
 

@@ -1,10 +1,10 @@
 # PROGRESS
 
-Progress tracker for **Edit** — a bare text editor for Android that opens and closes encrypted files in a format any tool can read and sync.
+Progress tracker for **Edit** — a text editor for Android that edits files where they already are, so any tool can sync them, opens everything that is not encrypted as it is, and will open and close encrypted files in a format any tool can read.
 
 ## Where the project stands
 
-A working bare editor: open files, several at once, edit them, save them, undo, at any size up to the cap. Everything where a mistake can corrupt a file quietly is pure Kotlin, kept free of anything Android, and the build has no test dependencies.
+A working editor for plain files: open files, several at once, edit them, save them, undo, at any size up to the cap. Everything where a mistake can corrupt a file quietly is pure Kotlin, kept free of anything Android, and the build has no test dependencies.
 
 ## Design decisions
 
