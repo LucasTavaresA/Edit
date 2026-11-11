@@ -106,6 +106,14 @@ class OpenFile(uri: Uri?, name: String, document: DocumentState? = null, said: S
      */
     var lasting = false
 
+    /**
+     * Where the top of the screen was when it was last on it, as a byte of the document: what it
+     * shows again once opened after being closed, or after a start. Kept with the list, so it is
+     * the one thing about a file's insides that is; never for an encrypted one, where even where
+     * its lines start says something about what it holds.
+     */
+    var top = 0
+
     /** New and never touched: leaving the list loses nothing, not even something to undo. */
     val untouched: Boolean
         get() = uri == null && document.let { it == null || !it.canUndo && !it.canRedo }
@@ -120,9 +128,9 @@ class OpenFile(uri: Uri?, name: String, document: DocumentState? = null, said: S
 private val turns = Mutex()
 
 /**
- * Where the list is written down for the next start: each file's link and name, in order, and
- * whether the first had focus. Never what is in them, so what comes back is each file as it stands
- * by then, and edits not saved before Edit stopped are not part of it.
+ * Where the list is written down for the next start: each file's link, name and where its screen
+ * stood, in order, and whether the first had focus. Never what is in them, so what comes back is
+ * each file as it stands by then, and edits not saved before Edit stopped are not part of it.
  */
 private const val KEPT = "files"
 
@@ -145,6 +153,9 @@ class Files private constructor(private val context: Context) {
 
     private var started = false
 
+    /** Whether the list is being written down as it changes, which waits on the start's own turn. */
+    private var keeping = false
+
     /**
      * What came with the activity, or with an intent handed to it later: [handed] is a file another
      * app handed over, or null. The first time, the list kept at the last start comes back, and
@@ -164,6 +175,7 @@ class Files private constructor(private val context: Context) {
             }
             trim()
             // Only once those have had their turn: a file found gone has left the list by then.
+            keeping = true
             scope.launch {
                 snapshotFlow { list.map { Triple(it.uri, it.name, it.document == null) } }.collect { keep() }
             }
@@ -291,6 +303,26 @@ class Files private constructor(private val context: Context) {
     /** The answer to [OpenFile.asking]: the document goes over whatever the file holds now. */
     fun overwrite(file: OpenFile) = inTurn { file.uri?.let { write(file, it, anyway = true) } }
 
+    /**
+     * Edit going out of sight, after which the process may be killed without another word: writes
+     * the list down with where the file on screen stands now. Every other file's place was noted
+     * as it left the screen. Not before the list kept at the last start has had its turn.
+     */
+    fun leaving() {
+        note(current)
+        if (keeping) keep()
+    }
+
+    /**
+     * Notes where [file]'s screen stands while it is still the one drawn. A document never drawn
+     * since it was opened says nothing, and the place it was given stands.
+     */
+    private fun note(file: OpenFile) {
+        val document = file.document ?: return
+        if (document.content.format == Format.Encrypted) file.top = 0
+        else document.shownFrom()?.let { file.top = it }
+    }
+
     /** Runs [task] once every file operation asked for before it has finished. */
     private fun inTurn(task: suspend () -> Unit) {
         scope.launch { turns.withLock { task() } }
@@ -305,6 +337,7 @@ class Files private constructor(private val context: Context) {
     private fun top(file: OpenFile) {
         val left = current
         if (left === file) return
+        note(left)
         list.remove(file)
         if (left.untouched) list.remove(left)
         list.add(0, file)
@@ -379,7 +412,9 @@ class Files private constructor(private val context: Context) {
                 say(null, "could not open ${file.name}: it is gone", Hold.UntilSeen)
                 return
             }
-            file.document = read(uri, file.name) ?: return
+            val document = read(uri, file.name) ?: return
+            document.showFrom(file.top)
+            file.document = document
             file.name = displayName(context, uri)
             file.notice = Notice(file.name, Hold.Briefly, file)
         }
@@ -446,7 +481,10 @@ class Files private constructor(private val context: Context) {
         for (i in 0 until files.length()) {
             val file = files.optJSONObject(i) ?: continue
             val uri = file.optString("uri").takeIf { it.isNotEmpty() } ?: continue
-            list.add(OpenFile(uri.toUri(), file.optString("name", uri)).also { it.lasting = true })
+            list.add(OpenFile(uri.toUri(), file.optString("name", uri)).also {
+                it.lasting = true
+                it.top = file.optInt("top", 0).coerceAtLeast(0)
+            })
         }
         return kept.getBoolean("focused", false)
     }
@@ -474,7 +512,9 @@ class Files private constructor(private val context: Context) {
             runCatching { resolver.releasePersistableUriPermission(held.uri, read or write) }
         }
         val files = JSONArray()
-        for (file in kept) files.put(JSONObject().put("uri", file.uri.toString()).put("name", file.name))
+        for (file in kept) {
+            files.put(JSONObject().put("uri", file.uri.toString()).put("name", file.name).put("top", file.top))
+        }
         context.getSharedPreferences(KEPT, Context.MODE_PRIVATE).edit {
             putString("files", files.toString())
             putBoolean("focused", kept.firstOrNull() === current)

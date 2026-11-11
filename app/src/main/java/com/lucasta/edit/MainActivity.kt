@@ -131,6 +131,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Out of sight, Edit may be killed without being told, so where the file on screen stands is
+     * written down now rather than at an end that may never come.
+     */
+    override fun onStop() {
+        super.onStop()
+        Files.of(this).leaving()
+    }
+
     /** Edit is a single instance, so another app handing a file over reaches the running one here. */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)

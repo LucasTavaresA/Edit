@@ -34,6 +34,7 @@ A decision earns a place only if it is spread across the code rather than sittin
 - **What a keyboard sends can be traced** by returning the editor's input connection wrapped in a `java.lang.reflect.Proxy` that logs each call with its arguments, its answer and the selection after it. Temporary only; it is not to be committed.
 - **The text size a pinch leaves is kept across starts**, so put it back after testing one.
 - **Edit is a single instance, so `am start -d <link>` at a running Edit joins its list of files** through `onNewIntent`; no force-stop is needed to hand over several. A file handed over that way is not kept across a start, since its access ends with the process, unless the intent also carries `--grant-persistable-uri-permission`, which is how to put files in the kept list without going through the picker. The kept list is readable with `adb shell run-as com.lucasta.edit.debug cat shared_prefs/files.xml`.
+- **Where the screen stood in the file on screen is written down when Edit goes out of sight**, so a test of a start sends Edit home before `am force-stop`; stopped while in front it is killed before being told, and what comes back is what was written when that file last left the screen.
 - **Only the toolbar is in a `uiautomator dump`.** The rows are drawn by hand and there is no text field, so no text reaches the accessibility tree; read the text off a screenshot.
 
 ## Measuring opens

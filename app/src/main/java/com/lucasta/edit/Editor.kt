@@ -264,6 +264,9 @@ class DocumentState(spill: File?) : Closeable {
     /** Set by [deselect] so that putting the cursor back where it stood does not scroll to it. */
     private var still = false
 
+    /** Where [showFrom] is waiting to put the top of the screen once it is drawn, or -1. */
+    private var showing = -1
+
     /** Keeps one key's step from starting before the last has finished, since it reads the screen. */
     private val stepping = Mutex()
 
@@ -968,6 +971,53 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
+     * Where the line at the top of the screen starts in the document, cut through or not, or null
+     * when the document is not on screen as it stands. A byte rather than a line number or a
+     * distance down the list: it means the same text at any width and any size, and finding it
+     * again counts nothing between it and the start of the file.
+     */
+    fun shownFrom(): Int? {
+        val info = list?.layoutInfo ?: return null
+        val item = info.visibleItemsInfo.lastOrNull { it.key is Int && it.offset <= 0 } ?: return null
+        val start = item.key as Int
+        val row = drawnAt(start) ?: return null
+        val line = row.layout.getLineForVerticalPosition(-item.offset.toFloat())
+        val spot = Spot(start, row.layout.getLineStart(line), row.layout.layoutInput.text, row.slice.takeIf { start != windowStart })
+        return offsetOf(spot)
+    }
+
+    /**
+     * Puts the screen where [shownFrom] said it was, once the document is drawn: the line holding
+     * [offset] at the top. Only right after [load], with the rows in step with the document. The
+     * file may hold other text by now, so the offset is only somewhere in it, and the line the
+     * byte falls in is what is shown, whatever came before it.
+     */
+    fun showFrom(offset: Int) {
+        val at = offset.coerceIn(0, length)
+        showing = at
+        place.requestScrollToItem(rowsNow().rowAt(at))
+    }
+
+    /**
+     * Finishes [showFrom] once the row is on screen: the row was gone to, and how far into it the
+     * line starts is only known once it is laid out.
+     */
+    suspend fun settle() {
+        val at = showing.takeIf { it >= 0 } ?: return
+        showing = -1
+        val list = this.list ?: return
+        repeat(3) {
+            withFrameNanos { }
+            val caret = caretAt(at)
+            if (caret != null) {
+                list.scrollBy(caret.top)
+                noteVisible()
+                return
+            }
+        }
+    }
+
+    /**
      * Where [char] of the row at [spot] is in the document. The window's own bytes are known only
      * once what the window holds is recorded, so asking about it records that first; a row past the
      * window has moved by whatever the window has gained, which [shifted] adds.
@@ -1653,6 +1703,8 @@ fun DocumentEditor(
         state.drawnIn(true, inset)
         onDispose { state.drawnIn(false) }
     }
+    // A document opened where it was left last time is put there once it is drawn.
+    LaunchedEffect(state) { state.settle() }
     // The screen under the text getting shorter — the keyboard coming up over a cursor put low on
     // the screen, a turn to landscape — must not leave the cursor under it.
     LaunchedEffect(list, state) {
