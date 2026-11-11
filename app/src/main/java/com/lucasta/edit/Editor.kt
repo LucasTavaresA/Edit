@@ -954,6 +954,20 @@ class DocumentState(spill: File?) : Closeable {
     }
 
     /**
+     * The start of the first line wholly on screen, or null as for [spotAt]. A row is a whole chunk
+     * and the screen can stand anywhere inside it, so the row's own start can be far above.
+     */
+    fun topSpot(): Spot? {
+        val info = list?.layoutInfo ?: return null
+        val item = info.visibleItemsInfo.lastOrNull { it.key is Int && it.offset <= 0 } ?: return spotAt(Offset.Zero)
+        val layout = drawnAt(item.key as Int)?.layout ?: return null
+        val inside = -item.offset.toFloat()
+        val line = layout.getLineForVerticalPosition(inside)
+        val y = if (layout.getLineTop(line) < inside) item.offset + layout.getLineBottom(line) else 0f
+        return spotAt(Offset(0f, y))
+    }
+
+    /**
      * Where [char] of the row at [spot] is in the document. The window's own bytes are known only
      * once what the window holds is recorded, so asking about it records that first; a row past the
      * window has moved by whatever the window has gained, which [shifted] adds.

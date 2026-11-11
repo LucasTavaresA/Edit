@@ -127,10 +127,12 @@ internal class KeyboardNode(private var state: DocumentState, private var clip: 
         if (focusState.isFocused) {
             if (arrived && session == null) start()
             // Focus that came without a place to type, as moving focus with a hardware keyboard's
-            // arrows brings it, puts the cursor at the top of the screen, as a text field puts one
+            // arrows brings it, puts the cursor at the first line on screen, as a text field puts one
             // somewhere when focus reaches it: otherwise the keyboard is up and typing goes nowhere.
             val state = state
-            if (arrived && state.windowStart < 0 && state.marked == null) coroutineScope.launch { state.focus(state.visibleFrom) }
+            if (arrived && state.windowStart < 0 && state.marked == null) coroutineScope.launch {
+                state.topSpot()?.let { state.tap(it) } ?: state.focus(state.visibleFrom)
+            }
         } else {
             session?.cancel()
             session = null

@@ -55,7 +55,6 @@ Two caps, both refused with our own message: 2 GB for plain files and a small on
 
 ## Not started
 
-- **Focus from a hardware keyboard's arrows puts the cursor at the start of the top row, which can be far above the screen.** A row is a whole chunk, so the cursor and the screen jump there. Rare, and left as it is.
 - **Back, button and gesture alike, works like vim's jumplist**, stepping backwards through earlier cursor positions and across files. Until then it only sends Edit to the background.
 - **Find out what happens when memory runs out** with several big files opened.
 - **How long an unlocked encrypted file stays decrypted.** Today it stays opened like a plain one, until it is closed or Edit stops, so it sits readable in the background; locking it on every switch is tiresome and gives files a second lifetime to manage. Undecided.
