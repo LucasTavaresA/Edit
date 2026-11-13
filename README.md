@@ -8,6 +8,21 @@ The reason to make it and rationale for why its that way and current progress is
 
 Contributions with AI or not are welcome.
 
+<table>
+  <tr>
+    <td colspan="2" align="center"><img src="screenshots/editor.png" width="260" alt="A Markdown note open in the editor"><br><sub>Edits files where they are</sub></td>
+    <td colspan="2" align="center"><img src="screenshots/files.png" width="260" alt="The list of open files with their folders"><br><sub>Several files open at once</sub></td>
+    <td colspan="2" align="center"><img src="screenshots/gigabyte.png" width="260" alt="A one gigabyte text file open"><br><sub>A whole gigabyte, opened as is</sub></td>
+  </tr>
+  <tr>
+    <td colspan="3" align="center"><img src="screenshots/keyboard.png" width="260" alt="Typing with the keyboard up, the toolbar moved above it"><br><sub>Typing, with undo and redo</sub></td>
+    <td colspan="3" align="center"><img src="screenshots/changed.png" width="260" alt="A dialog saying the file changed since it was opened, offering Save as, Cancel or Overwrite"><br><sub>Never overwrites someone else's changes unasked</sub></td>
+  </tr>
+  <tr>
+    <td colspan="6" align="center"><img src="screenshots/landscape.png" width="800" alt="A poem in English, Portuguese, Japanese and emoji, in landscape"><br><sub>Any script, either orientation</sub></td>
+  </tr>
+</table>
+
 Below is just absolutely essential information for people that want to quickly get around this project, written by the model who is making it, so quick small and concise, a complex project to build/develop is an absolute no go anyway.
 
 ## Build
