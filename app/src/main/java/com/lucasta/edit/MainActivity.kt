@@ -393,9 +393,8 @@ private fun Editor(files: Files) {
             title = { Text("${asking.name} changed") },
             text = {
                 Text(
-                    "Something else changed it since it was opened or last saved. This document is " +
-                        "still what the file held then, with your edits in it. Saving puts that over " +
-                        "whatever is there now."
+                    "Something else changed this file. This document is still what the file held " +
+                        "then, with your edits in it. Saving will overwrite what is in the file now."
                 )
             },
             confirmButton = {
@@ -422,8 +421,8 @@ private fun Editor(files: Files) {
     if (closing != null) {
         AlertDialog(
             onDismissRequest = { files.keepOpen(closing) },
-            title = { Text("Do you want to save ${closing.name} before closing it?") },
-            text = { Text("It has edits that are not saved. Closing without saving throws them away.") },
+            title = { Text("Save ${closing.name} before closing it?") },
+            text = { Text("Closing will throw away unsaved edits.") },
             confirmButton = {
                 TextButton(onClick = {
                     closing.closing = false
@@ -465,8 +464,8 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
     if (clearing && unopenedFiles > 0) {
         AlertDialog(
             onDismissRequest = { clearing = false },
-            title = { Text("Remove ${if (unopenedFiles == 1) "the unopened file" else "the $unopenedFiles unopened files"} from the list?") },
-            text = { Text("The files themselves stay where they are; only the list forgets them.") },
+            title = { Text("Remove ${if (unopenedFiles == 1) "the unopened file" else "$unopenedFiles unopened files"} from the list?") },
+            text = { Text("This just removes them from the recent files list.") },
             confirmButton = {
                 TextButton(onClick = {
                     clearing = false
@@ -485,8 +484,8 @@ private fun FileList(files: Files, bar: Rect, pixel: Dp, close: () -> Unit) {
             title = { Text("Remove all ${files.list.size} files from the list?") },
             text = {
                 Text(
-                    "The files themselves stay where they are; only the list forgets them. Each one " +
-                        "with edits that are not saved asks before it goes."
+                    "This just removes them from the recent files list, if there are unsaved changes " +
+                        "it will ask on each."
                 )
             },
             confirmButton = {
