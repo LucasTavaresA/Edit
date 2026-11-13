@@ -760,15 +760,16 @@ class DocumentState(spill: File?) : Closeable {
         val delta = span.now - span.was
         index = if (whole) oneChunk(content)
         else respan(index, span.at, span.at + span.was, delta, content, content.encoding, content.length)
-        val seen = span.at in visibleFrom..visibleTo
         if (visibleFrom > span.at && visibleFrom >= span.at + span.was) visibleFrom += delta
         else if (visibleFrom > span.at) visibleFrom = span.at
         windowStart = -1
         reach(chunkIndexAt(chunks, span.at.coerceIn(0, content.length)))
         open(span.at + span.now)
         opened++
-        // A change walked back somewhere off screen would look like nothing happening at all.
-        if (!seen) list?.scrollToItem(rowsNow().rowAt(windowStart))
+        // Nothing scrolls here. A change walked back off screen must be brought on, but [follow]
+        // answers the window just opened and does that, from where the cursor is actually drawn.
+        // The rows cannot tell: they know where the last one on screen starts, not how much of it
+        // the screen shows, and the window is usually taller than the screen.
         changed()
     }
 
