@@ -180,7 +180,36 @@ fun notText(head: ByteArray, encoding: Encoding): Boolean {
  * The run of characters one text has where another has a different run: [from] to [was] of the one,
  * standing in for [from] to [now] of the other.
  */
-class Change(val from: Int, val was: Int, val now: Int)
+class Change(val from: Int, val was: Int, val now: Int) {
+    /**
+     * Whether it only puts text in or only takes text out, which typing does one key at a time.
+     * One run swapped for another is a keyboard correcting a word: an action, not typing.
+     */
+    val typing: Boolean get() = was == from || now == from
+}
+
+/**
+ * Longer than any word a keyboard commits at once, swiped or picked from its suggestions, so that
+ * only a paste is.
+ */
+private const val WORD_MAX = 32
+
+/**
+ * Whether [text], committed by a keyboard in one go, is more than a word: two of them, a line break
+ * between two lines, or too long for one. That is what a keyboard's clipboard panel commits, and it
+ * commits it as it commits a word, so this is all that says it pasted. Space or a line break on
+ * either side is what a keyboard puts round a word, and a line break alone is the enter key.
+ *
+ * Asking the clipboard whether it holds the same text would be exact, but the system tells the
+ * user every time an app reads it.
+ */
+fun moreThanAWord(text: CharSequence): Boolean {
+    if (text.length >= WORD_MAX) return true
+    val start = text.indexOfFirst { !it.isWhitespace() }
+    if (start < 0) return false
+    val end = text.indexOfLast { !it.isWhitespace() }
+    return (start..end).any { text[it].isWhitespace() }
+}
 
 /**
  * What changed between what a window was given and what it holds now, or null if nothing did.

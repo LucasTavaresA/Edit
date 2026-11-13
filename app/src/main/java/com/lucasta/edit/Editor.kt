@@ -118,6 +118,24 @@ private const val INDEX_OFF_THREAD = 256 * 1024
  */
 private const val PAUSE_MILLIS = 1_000L
 
+/**
+ * How a change stands to the typing around it, which decides what one press of undo walks back
+ * with it. Only typing joins a run: every editing action is a step of its own.
+ */
+private enum class Joining {
+    /** Joins the run before it when it carries that run on, with no pause, from where it stopped. */
+    Typing,
+
+    /**
+     * Starts a step of its own, which typing carried on straight after it joins: typing over a
+     * selection, or taking one out, is one action however many keys finish it.
+     */
+    Starts,
+
+    /** A step of its own that nothing joins on either side: a paste or a cut. */
+    Alone,
+}
+
 /** Blank space under the last line, so the end of a file is not stuck against the bottom edge. */
 private val TAIL = 160.dp
 
@@ -525,7 +543,7 @@ class DocumentState(spill: File?) : Closeable {
         val at = window.selection.start
         val near = characterWithin(window.text, at, step)
         if (near != null) {
-            if (near != at) type(TextRange(near, at), "", own = false)
+            if (near != at) type(TextRange(near, at), "", Joining.Typing)
             return@withLock
         }
         commit()
@@ -556,17 +574,18 @@ class DocumentState(spill: File?) : Closeable {
         // typing commits nothing; a mark has the rows in step already.
         record()
         composition = null
-        put(mark ?: TextRange(byteOf(window.selection.end)), text)
+        if (mark != null) put(mark, text, Joining.Starts)
+        else put(TextRange(byteOf(window.selection.end)), text)
     }
 
     /**
-     * Puts [text] over [range], in the document's bytes, as typing: in the window when the window
-     * holds all of it, and through the document otherwise, the window opening again at the end of
-     * it either way.
+     * Puts [text] over [range], in the document's bytes, as typing unless [joining] says otherwise:
+     * in the window when the window holds all of it, and through the document otherwise, which is
+     * always a step of its own, the window opening again at the end of it either way.
      */
-    private fun put(range: TextRange, text: CharSequence) {
+    private fun put(range: TextRange, text: CharSequence, joining: Joining = Joining.Typing) {
         val chars = windowChars(range)
-        if (chars != null) type(chars, text, own = false)
+        if (chars != null) type(chars, text, joining)
         else replace(range, text, reopen = true)
     }
 
@@ -877,17 +896,17 @@ class DocumentState(spill: File?) : Closeable {
 
     /**
      * Puts [text] over the window's characters [chars], and the cursor after it. The window stays
-     * where it is. With [own] it is a change of its own, which is what a paste or a cut is, rather
-     * than typing that carries on from the typing before it.
+     * where it is. [joining] says whether it may carry on the typing before it, and whether the
+     * typing after it may carry it on.
      */
-    private fun type(chars: TextRange, text: CharSequence, own: Boolean = true) {
+    private fun type(chars: TextRange, text: CharSequence, joining: Joining = Joining.Alone) {
         // Before the edit as well as after it, so that what the window held before is not taken
         // into this change.
         record()
-        if (own) lastFrom = -1
+        if (joining != Joining.Typing) lastFrom = -1
         window.replace(chars.min, chars.max, text)
         record()
-        if (own) lastFrom = -1
+        if (joining == Joining.Alone) lastFrom = -1
     }
 
     /** Where the window's character [char] is in the document, once what it holds is recorded. */
@@ -1130,7 +1149,7 @@ class DocumentState(spill: File?) : Closeable {
         val to = windowStart + windowSlice.byteAt(change.was)
         val typed = content.encoding.encode(now, change.from, change.now)
         val at = SystemClock.elapsedRealtime()
-        val joins = lastFrom >= 0 && at - lastAt < PAUSE_MILLIS && (from == lastTo || to == lastFrom)
+        val joins = change.typing && lastFrom >= 0 && at - lastAt < PAUSE_MILLIS && (from == lastTo || to == lastFrom)
         content.replace(from, to, typed, joins)
         windowSlice = windowSlice.replacing(change.from, change.was, now.subSequence(change.from, change.now), typed.size)
         lastAt = at
@@ -1413,14 +1432,21 @@ class DocumentState(spill: File?) : Closeable {
      * the window when the window holds all of it, as typing always does, so that it is typing like
      * any other; through the document otherwise, which is a selection reaching past the window,
      * and the window opens again at the end of it.
+     *
+     * Over a selection it starts a step of its own, and with [pasted] it is one: see [Joining].
      */
-    fun replaceChars(from: Int, to: Int, text: CharSequence) {
+    fun replaceChars(from: Int, to: Int, text: CharSequence, pasted: Boolean = false) {
         record()
+        val joining = when {
+            pasted -> Joining.Alone
+            marked != null -> Joining.Starts
+            else -> Joining.Typing
+        }
         unmark()
         if (windowStart >= 0) {
             val base = rowChar(windowStart)
             if (from >= base && to <= base + window.text.length) {
-                type(TextRange(from - base, to - base), text, own = false)
+                type(TextRange(from - base, to - base), text, joining)
                 return
             }
         }

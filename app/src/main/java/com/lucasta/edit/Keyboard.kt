@@ -279,8 +279,8 @@ private class Link(private val keyboard: Keyboard) : InputConnection {
      * Puts [text] over [range], in the document's characters, and the cursor where [cursor] says:
      * past the end of it for 1, before it for 0, and counted from either from there.
      */
-    private fun put(range: TextRange, text: CharSequence, cursor: Int) {
-        state.replaceChars(range.min, range.max, text)
+    private fun put(range: TextRange, text: CharSequence, cursor: Int, pasted: Boolean = false) {
+        state.replaceChars(range.min, range.max, text, pasted)
         val after = range.min + text.length
         val at = (if (cursor > 0) after + cursor - 1 else range.min + cursor).coerceIn(0, state.charCount())
         if (at != after) state.selectChars(at, at)
@@ -293,9 +293,11 @@ private class Link(private val keyboard: Keyboard) : InputConnection {
         return TextRange(now.min, now.max)
     }
 
+    /** More than a word at once is a keyboard pasting, and a step of undo of its own. */
     override fun commitText(text: CharSequence?, newCursorPosition: Int) = edit {
         val range = target() ?: return@edit
-        put(range, text ?: "", newCursorPosition)
+        val typed = text ?: ""
+        put(range, typed, newCursorPosition, pasted = moreThanAWord(typed))
         state.composition = null
     }
 
