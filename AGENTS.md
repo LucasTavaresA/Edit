@@ -4,7 +4,7 @@ I want to ultimately have a text editing app, i also want it to handle encrypted
 
 You maintain PROGRESS.md which tracks our progress and keep all info across compactions, read it fully at the beginning of every conversation, it strictly defines what we have and needs to be explicitly decided against with me when going to a different direction.
 
-We maintain CLAUDE.md, but avoid modifying things here as much as you can, try to append instead, add things that don't fit PROGRESS.md here, organize into sections.
+We maintain AGENTS.md, but avoid modifying things here as much as you can, try to append instead, add things that don't fit PROGRESS.md here, organize into sections.
 
 ## Git
 
